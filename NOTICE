@@ -1,0 +1,36 @@
+RecoverAll
+==========
+
+RecoverAll is an independent project. It is not affiliated with, endorsed by or sponsored by
+R-Tools Technology Inc. (R-Studio), Runtime Software (GetDataBack) or CGSecurity / Christophe Grenier
+(TestDisk, PhotoRec); those names appear only to describe the kind of features RecoverAll offers.
+No code from any of them is used.
+
+Its own code
+------------
+
+The filesystem readers (NTFS, FAT, exFAT, ext2/3/4, XFS, HFS+, ISO 9660), the signature search, the
+partition search, the boot-sector repairs, the virtual RAID and the file repairs are written from the
+published format specifications and documentation, among them: Microsoft's FAT and exFAT specifications
+and [MS-XCA] (XPRESS, LZX), the Linux kernel's ext4, XFS and md documentation, Apple's TN1150 (HFS+),
+ECMA-119 and the Rock Ridge/Joliet extensions, the UEFI specification (GPT), and the file formats' own
+specifications (JPEG/EXIF, PNG, ISO base media, RIFF, ZIP, PDF and the others listed by
+`recoverctl formats`).
+
+Tools it runs (not bundled)
+---------------------------
+
+* GNU ddrescue, GPL-3.0-or-later, https://www.gnu.org/software/ddrescue/ — images failing disks.
+* The Sleuth Kit (fls, icat, fsstat, pstat), IPL-1.0/CPL-1.0/GPL, https://www.sleuthkit.org — the second
+  engine for APFS and UFS.
+* btrfs-progs, GPL-2.0 — reads and repairs Btrfs.
+* util-linux (lsblk, blkid, sfdisk, losetup, partx), GPL-2.0-or-later — disks, partition tables.
+* cryptsetup, GPL-2.0-or-later — unlocks LUKS and BitLocker volumes (read-only).
+* mdadm, GPL-2.0-or-later — reads Linux software-RAID superblocks.
+* smartmontools (smartctl), GPL-2.0-or-later — disk health.
+* e2fsprogs, dosfstools, exfatprogs, ntfs-3g / ntfsprogs, xfsprogs, hfsprogs / hfsplus-tools,
+  f2fs-tools, jfsutils, reiserfsprogs — check and repair filesystems.
+
+The design system of the app (theme.py, icons.py, worker.py, jobview.py, diskmap.py and parts of
+widgets.py) is shared with CloneAndRecover, DiskHealth, LinBurn, VirtConvert&Create, AquasuiteLinux and
+FirmwareLab by the same author.

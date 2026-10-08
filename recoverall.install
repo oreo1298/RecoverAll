@@ -1,0 +1,10 @@
+post_install() {
+  echo ":: RecoverAll installed. Start it from your application menu, or run: recoverall"
+  echo ":: Command line: recoverctl (run the commands that read disks with sudo)."
+  echo ":: Optional tools (imaging, repairs, encrypted volumes): see 'recoverctl doctor'."
+}
+
+post_remove() {
+  echo ":: Kept: /var/lib/recoverall (saved scans, history, partition-table backups for Undo)."
+  echo ":: The files you recovered and your disk images are where you saved them."
+}

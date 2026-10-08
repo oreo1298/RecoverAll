@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RecoverAll
+GenericName=Data Recovery
+Comment=Recover deleted files, lost partitions and photos from disks, memory cards, sticks and RAIDs
+Exec=recoverall
+Icon=io.github.oreo1298.RecoverAll
+Terminal=false
+Categories=System;Utility;Filesystem;Qt;
+Keywords=recover;recovery;undelete;deleted;restore;files;photos;pictures;partition;lost;format;formatted;SD card;USB;NTFS;FAT32;exFAT;ext4;XFS;RAID;carving;TestDisk;PhotoRec;R-Studio;GetDataBack;
+StartupNotify=true
+StartupWMClass=recoverall

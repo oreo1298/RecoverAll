@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fc3ff"/>
+      <stop offset="1" stop-color="#3a5fe8"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6eeff"/>
+    </linearGradient>
+    <linearGradient id="go" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3ddc97"/>
+      <stop offset="1" stop-color="#1fb889"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#bg)"/>
+  <!-- the disk, behind -->
+  <circle cx="98" cy="150" r="66" fill="#ffffff" fill-opacity="0.18"/>
+  <circle cx="98" cy="150" r="66" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="6"/>
+  <circle cx="98" cy="150" r="38" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="5" stroke-dasharray="10 8"/>
+  <circle cx="98" cy="150" r="9" fill="#ffffff" fill-opacity="0.75"/>
+  <!-- the file coming back -->
+  <path d="M122 46h56l30 30v96a12 12 0 0 1-12 12h-74a12 12 0 0 1-12-12V58a12 12 0 0 1 12-12z" fill="url(#page)"/>
+  <path d="M178 46v22a8 8 0 0 0 8 8h22z" fill="#c9d6ff"/>
+  <!-- a little picture on it -->
+  <rect x="128" y="92" width="64" height="44" rx="6" fill="#dbe5ff"/>
+  <path d="M130 132l18-18 13 12 10-8 19 14v2h-60z" fill="#4f7cf0"/>
+  <circle cx="176" cy="104" r="6" fill="#f5b945"/>
+  <rect x="128" y="146" width="52" height="7" rx="3.5" fill="#4f7cf0" fill-opacity="0.35"/>
+  <rect x="128" y="160" width="36" height="7" rx="3.5" fill="#4f7cf0" fill-opacity="0.25"/>
+  <!-- the restore arrow -->
+  <circle cx="188" cy="190" r="36" fill="url(#go)"/>
+  <path d="M188 200v-30M175 182l13-13 13 13" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M172 207h32" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round"/>
+</svg>

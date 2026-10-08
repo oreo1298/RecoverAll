@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recoverall"
+version = "1.0.0"
+description = "Data recovery for Linux: deleted files on every popular filesystem, lost partitions, photos from memory cards, damaged disks and RAIDs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "RecoverAll contributors" }]
+keywords = ["data recovery", "undelete", "file recovery", "partition recovery", "photo recovery", "file carving",
+            "NTFS", "FAT32", "exFAT", "ext4", "XFS", "RAID", "R-Studio alternative", "TestDisk", "PhotoRec"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Recovery Tools",
+    "Topic :: System :: Filesystems",
+    "Topic :: System :: Archiving",
+]
+# The core, the helper and the CLI use only the standard library (plus the disk tools they run).
+# The GUI needs PySide6 (from your distribution, or the "gui" extra).
+dependencies = []
+
+[project.optional-dependencies]
+# PySide6 6.12.0 loses a reference to None in every call that returns nothing, which crashes Python 3.10
+# and 3.11 (None is immortal from 3.12). The app works around it (recoverall/gui/__init__.py), but
+# pip shouldn't pick it there.
+gui = ["PySide6-Essentials>=6.5,!=6.12.0; python_version < '3.12'",
+       "PySide6-Essentials>=6.5; python_version >= '3.12'"]
+dev = ["pytest>=7", "ruff",
+       "PySide6-Essentials>=6.5,!=6.12.0; python_version < '3.12'",
+       "PySide6-Essentials>=6.5; python_version >= '3.12'"]
+
+[project.scripts]
+recoverctl = "recoverall.cli:main"
+recoverall-helper = "recoverall.core.helper:main"
+
+[project.gui-scripts]
+recoverall = "recoverall.gui.app:main"
+
+[project.urls]
+Homepage = "https://github.com/oreo1298/RecoverAll"
+Repository = "https://github.com/oreo1298/RecoverAll"
+Issues = "https://github.com/oreo1298/RecoverAll/issues"
+
+[tool.setuptools.packages.find]
+include = ["recoverall*"]
+
+[tool.setuptools.package-data]
+recoverall = ["data/*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "root: needs root and loop devices or FUSE to build filesystem images (skipped otherwise)",
+    "slow: takes more than a few seconds",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+# E501 long lines, E741 ambiguous names
+ignore = ["E501", "E741"]

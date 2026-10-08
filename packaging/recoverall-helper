@@ -1,0 +1,4 @@
+#!/bin/sh
+# Started by the RecoverAll app through pkexec ("Grant access"): serves the app over stdin/stdout as root for
+# one session, and stops when the app closes.
+exec recoverall-helper --stdio "$@"

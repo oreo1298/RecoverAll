@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.oreo1298.RecoverAll</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>RecoverAll</name>
+  <summary>Recover deleted files, lost partitions and photos</summary>
+  <description>
+    <p>
+      RecoverAll gets data back from disks, memory cards, USB sticks, disk images and RAIDs: from deleting a few
+      photos by mistake to a formatted drive, deleted partitions or a damaged filesystem.
+    </p>
+    <ul>
+      <li>Undelete files on NTFS, FAT12/16/32, exFAT, ext2/3/4, XFS, HFS+ and ISO 9660 with their names and folders; Btrfs, APFS and UFS through btrfs-progs and The Sleuth Kit</li>
+      <li>Deep scan: rebuild formatted, damaged and lost filesystems (NTFS without a boot sector, FAT folders after a quick format, ext files from the journal)</li>
+      <li>Find files by their signature (over 150 file types), like PhotoRec</li>
+      <li>Find deleted partitions and write them back, with an undo, like TestDisk; repair boot sectors from their backups</li>
+      <li>Recover deleted photos and videos from a camera card with a thumbnail grid</li>
+      <li>Repair damaged photos, Office documents, archives, PDFs and sound and video containers</li>
+      <li>Image failing disks (GNU ddrescue or its own imager) and assemble virtual RAIDs (0, 1, 5, 6, 10, JBOD)</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.oreo1298.RecoverAll.desktop</launchable>
+  <url type="homepage">https://github.com/oreo1298/RecoverAll</url>
+  <url type="bugtracker">https://github.com/oreo1298/RecoverAll/issues</url>
+  <developer id="io.github.oreo1298">
+    <name>oreo1298</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/oreo1298/RecoverAll/main/docs/screenshots/results-dark.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-10-08"/>
+  </releases>
+</component>
