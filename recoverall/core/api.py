@@ -379,6 +379,8 @@ class LocalAPI:
         from .safety import check_confirmation, check_unmounted
         if not isinstance(source, str):
             raise RallError("A partition table can only be written to a disk or an image file")
+        from .vdisk import check_raw_file
+        check_raw_file(source, "Writing a partition table")
         disk = devices.disk_info(source)
         check_unmounted(source, "Writing a partition table")
         check_confirmation(disk, confirm)
@@ -431,6 +433,8 @@ class LocalAPI:
         path = source if isinstance(source, str) else source.get("path")
         if not path:
             raise RallError("Repairs work on disks, partitions and image files")
+        from .vdisk import check_raw_file
+        check_raw_file(path, "Repairing")
         disk = devices.disk_info(path) if os.path.exists(path) and not os.path.isfile(path) else \
             {"path": path, "is_image": True, "display_name": os.path.basename(path)}
         check_unmounted(path, "Repairing")
@@ -533,6 +537,8 @@ class LocalAPI:
         size = None if isinstance(source, str) else source.get("size")
         loop = None
         dev = path
+        from .vdisk import check_raw_file
+        check_raw_file(path, "Unlocking an encrypted volume")
         if offset or os.path.isfile(path):
             cmd = ["losetup", "-f", "--show", "-r"]
             if offset:

@@ -9,7 +9,7 @@ env:
   DISK_TOOLS: >-
     libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 fdisk dosfstools mtools exfatprogs exfat-fuse
     ntfs-3g e2fsprogs fuse2fs xfsprogs btrfs-progs hfsprogs xorriso genisoimage sleuthkit gddrescue
-    cryptsetup-bin mdadm wimtools makefs
+    cryptsetup-bin mdadm wimtools makefs qemu-utils ewf-tools
 
 jobs:
   test:

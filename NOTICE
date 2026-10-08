@@ -13,7 +13,9 @@ The filesystem readers (NTFS, FAT, exFAT, ext2/3/4, XFS, HFS+, ISO 9660), the si
 partition search, the boot-sector repairs, the virtual RAID and the file repairs are written from the
 published format specifications and documentation, among them: Microsoft's FAT and exFAT specifications
 and [MS-XCA] (XPRESS, LZX), the Linux kernel's ext4, XFS and md documentation, Apple's TN1150 (HFS+),
-ECMA-119 and the Rock Ridge/Joliet extensions, the UEFI specification (GPT), and the file formats' own
+ECMA-119 and the Rock Ridge/Joliet extensions, the UEFI specification (GPT), Microsoft's VHD and [MS-VHDX]
+specifications, VMware's Virtual Disk Format 5.0, QEMU's qcow2 specification, the libewf project's
+documentation of the EWF (E01) format, and the file formats' own
 specifications (JPEG/EXIF, PNG, ISO base media, RIFF, ZIP, PDF and the others listed by
 `recoverctl formats`).
 

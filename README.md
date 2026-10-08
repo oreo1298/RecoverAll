@@ -72,8 +72,9 @@ and Wayland.
 - **Repair damaged files**: JPEG (cut, no end marker, broken header, or rebuilt from a reference photo
   from the same camera), PNG, GIF, ZIP/DOCX/XLSX/ODT, PDF (a new cross-reference table), WAV/AVI/AIFF/WebP,
   MP3, MP4 and gzip/bz2/xz. The original file is never changed.
-- **Disk images**: raw images (`.img`, `.dd`, `.iso`, split `.001`/`.aa`, ddrescue output) and `.rallraid`
-  virtual RAIDs work everywhere a disk does, without root.
+- **Disk images** work everywhere a disk does, without root: raw images (`.img`, `.dd`, `.iso`, split
+  `.001`/`.aa`, ddrescue output), **virtual machine disks** (VirtualBox VDI, VMware VMDK, Hyper-V VHD/VHDX,
+  QEMU QCOW2) and **EnCase E01** forensic images, read natively, plus `.rallraid` virtual RAIDs.
 
 **Everything else**
 - A **command-line tool**, `recoverctl`, for scripts and SSH: everything the app does.

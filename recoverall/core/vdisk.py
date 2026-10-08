@@ -57,10 +57,6 @@ EWF2_LOGICAL = b"LEF2\x0d\x0a\x81\x00"
 VDI_SIGNATURE = 0xBEDA107F
 GD_AT_END = 0xFFFFFFFFFFFFFFFF
 
-FORMAT_NAMES = {"VHD": "Virtual PC / Hyper-V disk", "VHDX": "Hyper-V disk", "VDI": "VirtualBox disk",
-                "VMDK": "VMware disk", "QCOW2": "QEMU disk", "QCOW": "QEMU disk (QCOW 1)",
-                "E01": "EnCase forensic image"}
-
 
 def _u16(b: bytes, o: int) -> int:
     return struct.unpack_from("<H", b, o)[0]

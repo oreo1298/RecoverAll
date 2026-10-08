@@ -100,6 +100,11 @@ def image_args(src: Source) -> tuple[list[str], int]:
             break
     if isinstance(s, SplitSource):
         return [f.path for f in s.files], base
+    from ..vdisk import VDiskSource
+    if isinstance(s, VDiskSource):
+        raise NotSupported(f"Tools that read the image file itself (The Sleuth Kit, btrfs-progs) can't see inside "
+                           f"a {s.format} image: save it as a raw image first (Imaging page, or recoverctl image) "
+                           "and scan that")
     if isinstance(s, FileSource):
         return [s.path], base
     if isinstance(s, ConcatSource) or not src.path or not os.path.exists(src.path):

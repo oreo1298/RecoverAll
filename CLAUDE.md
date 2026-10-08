@@ -9,6 +9,8 @@ covers the other distributions. Design notes: docs/HOW-IT-WORKS.md.
   - `blockio.py`: `Source` (read-only byte range; `read()` zero-fills and records unreadable sectors in
     `src.bad`), `FileSource`, `BytesSource`, `RegionSource`, `ConcatSource` (free space as one source,
     `map_range`), `CachedSource`, `SplitSource`; `open_source(spec)` for paths, regions and `.rallraid`.
+  - `vdisk.py`: native VHD/VHDX/VDI/VMDK/QCOW2/E01 readers (`open_vdisk`, tried by `open_source` on regular
+    files); `check_raw_file` refuses repairs, table writes and loop devices on them (sectors aren't in order).
   - `fs/`: one reader per filesystem (`ntfs.py`, `fat.py`, `exfat.py`, `ext.py`, `xfs.py`, `hfsplus.py`,
     `iso9660.py`, `btrfs.py` via btrfs-progs, `tsk.py` via The Sleuth Kit). Contract in `fs/base.py`:
     `FsReader.probe(src)`, `entries(deleted=True, ctl)` yields `Entry` (key/parent/runs/data/chance/flags/extra),

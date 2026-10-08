@@ -13,6 +13,15 @@ disk) is retried one sector at a time, then returned as zeros and recorded in `s
 every file that touches such a sector, and a scan never stops because of one. Disks are opened `O_RDONLY`
 and never mounted. Nothing in a scan, a preview or a recovery writes to them.
 
+**Virtual-disk and forensic images** (`core/vdisk.py`) are sources too: VirtualBox VDI, VMware VMDK
+(sparse, stream-optimized, and descriptor files with flat or sparse extents), Hyper-V VHD and VHDX, QEMU
+QCOW2 (compressed and zero clusters, backing files) and EnCase E01 (split segments, zlib chunks). Each one
+reads as the disk the guest or the suspect machine saw. The format is recognized by its signature, so the
+file name doesn't matter. Missing pieces read as zeros and are recorded as unreadable, like bad sectors: an
+image cut short, a lost segment, a chunk that won't decompress. Differencing disks and snapshots are refused
+with a message, since they only hold the changes against a parent disk. Operations that work on the image
+file itself (repairs, writing a partition table) are refused for these formats.
+
 ## A scan (`core/scan.py`)
 
 A scan runs these steps, then saves everything in a `.rascan` file:

@@ -415,7 +415,7 @@ def open_source(spec, sector_size: int | None = None) -> Source:
     if path.endswith(".rallraid"):
         from .raid import RaidSource
         return RaidSource.from_file(path)
-    # VHD(X), VDI, VMDK, QCOW2, E01: regular files only, a few KiB read
+    # VHD(X), VDI, VMDK, QCOW2, E01: only regular files are looked at, and only their first and last KiB
     from .vdisk import open_vdisk
     vdisk = open_vdisk(path, sector_size)
     if vdisk is not None:

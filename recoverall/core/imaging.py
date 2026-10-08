@@ -401,9 +401,11 @@ def run_image(job, source_spec, dest: str, options: dict | None = None) -> dict:
     try:
         if os.path.exists(dest) and os.path.isfile(dest) and not os.path.exists(mapfile) and os.path.getsize(dest):
             raise RallError(f"{dest} exists and has no mapfile: choose another name (nothing is overwritten)")
+        from .vdisk import container_of
         path = src.path if getattr(src, "path", "") and not hasattr(src, "members") else ""
-        use_dd = engine == "ddrescue" or (engine == "auto" and ddrescue_available() and path and
-                                          os.path.exists(path) and not os.path.isfile(path))
+        virtual = container_of(src) is not None     # ddrescue would copy the image file, not the disk in it
+        use_dd = not virtual and (engine == "ddrescue" or (engine == "auto" and ddrescue_available() and path and
+                                                           os.path.exists(path) and not os.path.isfile(path)))
         job.set_steps(["Copy what reads easily", "Read the bad areas", "Done"])
         job.step(0, f"{'GNU ddrescue' if use_dd else 'RecoverAll imager'} → {dest}")
         job.log(f"Mapfile: {mapfile} (keep it: imaging can be resumed and improved with it)")
