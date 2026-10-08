@@ -193,9 +193,15 @@ else
   say "PySide6 isn't packaged here: installing PySide6-Essentials from PyPI (~100 MB)"
   extras="gui"
 fi
-"$VENV/bin/python" -m pip install --quiet --upgrade --force-reinstall --no-deps "$HERE" >/dev/null
+# build from a clean copy: pip writes build/ and *.egg-info next to the sources, and a root-owned leftover in
+# your clone would break a later per-user install or update
+SRC="$(mktemp -d "${TMPDIR:-/tmp}/recoverall-src.XXXXXX")"
+trap 'rm -rf "$SRC"' EXIT
+tar -C "$HERE" --exclude=./.git --exclude='*.egg-info' --exclude=./build --exclude=./dist --exclude=./.venv \
+  --exclude=__pycache__ -cf - . | tar -C "$SRC" -xf -
+"$VENV/bin/python" -m pip install --quiet --upgrade --force-reinstall --no-deps "$SRC" >/dev/null
 if [ -n "$extras" ]; then
-  "$VENV/bin/python" -m pip install --quiet "$HERE[$extras]" || warn "Installing PySide6 failed: the app won't start (recoverctl still works)"
+  "$VENV/bin/python" -m pip install --quiet "$SRC[$extras]" || warn "Installing PySide6 failed: the app won't start (recoverctl still works)"
 fi
 
 mkdir -p "$PREFIX/bin" "$BIN"

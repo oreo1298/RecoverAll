@@ -113,9 +113,17 @@ def fuse_mount(img: Path, fstype: str, mnt: Path):
     """Mount IMG with a FUSE driver (ntfs-3g, exfat-fuse/mount.exfat-fuse, fuse2fs)."""
     mnt.mkdir(parents=True, exist_ok=True)
     loops: list[str] = []
+
+    def mount(*cmd):
+        # FUSE may be refused here (no /dev/fuse access, fusermount without user_allow_other, ...): skip
+        try:
+            sh(*cmd)
+        except RuntimeError as exc:
+            pytest.skip(f"{fstype} can't be mounted with FUSE here: {exc}")
+
     if fstype == "ntfs":
         need("ntfs-3g")
-        sh("ntfs-3g", img, mnt)
+        mount("ntfs-3g", img, mnt)
     elif fstype == "exfat":
         exe = shutil.which("mount.exfat-fuse") or shutil.which("exfat-fuse")
         if not exe or not os.path.exists("/dev/fuse"):
@@ -125,15 +133,15 @@ def fuse_mount(img: Path, fstype: str, mnt: Path):
             loop = sh("losetup", "-f", "--show", img).strip()
             try:
                 sh(exe, loop, mnt)
-            except RuntimeError:
+            except RuntimeError as exc:
                 sh("losetup", "-d", loop, check=False)
-                raise
+                pytest.skip(f"exfat-fuse can't mount here: {exc}")
             loops.append(loop)
         else:
-            sh(exe, img, mnt)
+            mount(exe, img, mnt)
     elif fstype in ("ext2", "ext3", "ext4"):
         need("fuse2fs")
-        sh("fuse2fs", "-o", "fakeroot", img, mnt)
+        mount("fuse2fs", "-o", "fakeroot", img, mnt)
     else:
         raise ValueError(fstype)
     try:

@@ -27,6 +27,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends $DISK_TOOLS
+          # exfat-fuse mounts with allow_other: let the tests mount exFAT images as a normal user
+          echo user_allow_other | sudo tee -a /etc/fuse.conf
       - name: Install
         run: |
           python -m pip install --upgrade pip
