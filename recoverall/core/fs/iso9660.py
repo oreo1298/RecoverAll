@@ -211,6 +211,17 @@ class _Rec:
         return "/".join(self.sl) if self.sl != [""] else "/"
 
 
+def _unique(key, pos: int, keys: set):
+    """KEY, or another one no entry has yet: damaged folders can overlap, so the same record may be read twice."""
+    if key not in keys:
+        return key
+    alt, n = f"x{pos}", 1
+    while alt in keys:
+        n += 1
+        alt = f"x{pos}.{n}"
+    return alt
+
+
 class Iso9660Reader(FsReader):
     fstype = "iso9660"
     name = "ISO 9660"
@@ -474,8 +485,7 @@ class Iso9660Reader(FsReader):
                     e.key = dlba * self.bs
                     e.is_dir = True
                     e.extra["lba"] = dlba
-                    if e.key in keys:                  # overlapping metadata: keep keys unique
-                        e.key = f"x{r.pos}"
+                    e.key = _unique(e.key, r.pos, keys)    # overlapping metadata: keep keys unique
                     if dsize and depth < _MAX_DEPTH:
                         queue.append((dlba, dsize, e.key, depth + 1))
                 elif r.symlink is not None or (r.mode is not None and r.mode & _S_IFMT == _S_IFLNK):
@@ -487,8 +497,7 @@ class Iso9660Reader(FsReader):
                     if outside:
                         e.flags |= F_PARTIAL
                         self.warn("Some files lie past the end of the image (it is probably truncated).")
-                if e.key in keys:
-                    e.key = f"x{r.pos}"
+                e.key = _unique(e.key, r.pos, keys)
                 keys.add(e.key)
                 yield e
 

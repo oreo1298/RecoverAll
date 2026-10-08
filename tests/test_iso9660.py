@@ -244,7 +244,7 @@ def test_fuzz_does_not_raise(srctree, tmp_path):
             buf[sec * 2048 + rng.randrange(2048)] = rng.randrange(256)
         if rng.random() < 0.2:
             sec = rng.choice(meta)
-            buf[sec * 2048:(sec + 1) * 2048] = os.urandom(2048)
+            buf[sec * 2048:(sec + 1) * 2048] = rng.randbytes(2048)
         s = BytesSource(bytes(buf))
         info2 = Iso9660Reader.probe(s)
         if info2 is None:
