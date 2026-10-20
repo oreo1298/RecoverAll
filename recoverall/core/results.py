@@ -25,7 +25,7 @@ from typing import Iterator
 
 from .errors import ScanError
 from .filetypes import EXT_CATEGORY, extension
-from .fs.base import F_DIR_RECOVERED, F_ORPHAN, F_SYSTEM, Entry
+from .fs.base import F_DIR_RECOVERED, F_ORPHAN, F_SYMLINK, F_SYSTEM, Entry
 
 SCHEMA_VERSION = 1
 
@@ -401,6 +401,80 @@ class ScanDB:
                "SELECT e.id FROM entries e JOIN t ON e.id = t.id WHERE e.is_dir = 0" + (f" AND {where}" if where else ""))
         for (i,) in self.conn.execute(sql, params):
             yield i
+
+    def _selection_sql(self, include, exclude, filters: dict | None, select: str) -> tuple[str, list]:
+        """The query behind selection(): the checked entries go into temporary tables (they can be many),
+        and the walk down from each INCLUDE entry stops at EXCLUDE entries. An entry included inside an
+        excluded folder is a starting point of its own, so it still counts."""
+        c = self.conn
+        c.execute("CREATE TEMP TABLE IF NOT EXISTS sel_include (id INTEGER PRIMARY KEY)")
+        c.execute("CREATE TEMP TABLE IF NOT EXISTS sel_exclude (id INTEGER PRIMARY KEY)")
+        c.execute("DELETE FROM sel_include")
+        c.execute("DELETE FROM sel_exclude")
+        c.executemany("INSERT OR IGNORE INTO sel_include VALUES (?)", [(int(i),) for i in include])
+        c.executemany("INSERT OR IGNORE INTO sel_exclude VALUES (?)", [(int(i),) for i in exclude or ()])
+        params: list = []
+        where = self._filters(filters, params)
+        sql = ("WITH RECURSIVE t(id) AS (SELECT id FROM sel_include UNION "
+               "SELECT e.id FROM entries e JOIN t ON e.parent = t.id WHERE e.id NOT IN (SELECT id FROM sel_exclude)) "
+               f"SELECT {select} FROM entries e JOIN t ON e.id = t.id WHERE e.is_dir = 0"
+               + (f" AND {where}" if where else ""))
+        return sql, params
+
+    def selection(self, include, exclude=(), filters: dict | None = None) -> list[int]:
+        """The files a checked selection stands for: each INCLUDE entry (a file, or a folder with everything
+        under it), minus everything under the EXCLUDE entries (unchecked inside a checked folder). FILTERS
+        narrow it further (the browser passes only hide_system)."""
+        if not include:
+            return []
+        sql, params = self._selection_sql(include, exclude, filters, "e.id")
+        try:
+            return [i for (i,) in self.conn.execute(sql, params)]
+        finally:
+            self.conn.commit()          # end the transaction the temporary tables opened
+
+    def selection_stats(self, include, exclude=(), filters: dict | None = None) -> dict:
+        """How many files (empty ones left out, as recovery skips them), bytes and deleted files a checked
+        selection holds."""
+        if not include:
+            return {"files": 0, "bytes": 0, "deleted": 0}
+        sql, params = self._selection_sql(include, exclude, filters, "e.size, e.deleted, e.flags")
+        files = size = deleted = 0
+        try:
+            for sz, dl, fl in self.conn.execute(sql, params):
+                if sz > 0 or fl & F_SYMLINK:
+                    files += 1
+                    size += sz
+                    deleted += 1 if dl else 0
+        finally:
+            self.conn.commit()
+        return {"files": files, "bytes": size, "deleted": deleted}
+
+    def ancestors(self, ids) -> dict[int, list[int]]:
+        """The folders above each entry, nearest first, up to its volume's root (what the browser needs to
+        show a checked folder's contents as checked)."""
+        parent_of: dict[int, int | None] = {}
+        todo = {int(i) for i in ids}
+        while todo:
+            batch = list(todo)[:900]
+            todo.difference_update(batch)
+            got = dict(self.conn.execute(f"SELECT id, parent FROM entries WHERE id IN ({', '.join('?' * len(batch))})",
+                                         batch).fetchall())
+            for i in batch:
+                p = got.get(i)
+                parent_of[i] = p
+                if p is not None and p not in parent_of:
+                    todo.add(p)
+        out = {}
+        for i in ids:
+            chain, seen = [], {int(i)}
+            p = parent_of.get(int(i))
+            while p is not None and p not in seen:
+                chain.append(p)
+                seen.add(p)
+                p = parent_of.get(p)
+            out[int(i)] = chain
+        return out
 
     def recount(self, vol: int) -> None:
         """Recompute a volume's totals (after entries were removed)."""

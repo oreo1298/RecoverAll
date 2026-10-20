@@ -376,7 +376,7 @@ class RecoverPage(OperationPage):
             self.bridge.call("save_scan", success="Scan saved", scan=scan, dest=dest)
 
     # ------------------------------------------------------------------ recovering
-    def recover(self, ids: list, filters: dict, what: str) -> None:
+    def recover(self, ids: list, filters: dict, what: str, exclude: list | None = None) -> None:
         if not ids:
             return
         info = self.results.info or {}
@@ -393,7 +393,7 @@ class RecoverPage(OperationPage):
             self.jobview.t_done.caption.setText("Recovered")
             self.run_job(job)
         self.bridge.call("start_recover", done=started, scan=self.results.scan, entries=[int(i) for i in ids],
-                         dest=dest, options=opts, filters=filters)
+                         dest=dest, options=opts, filters=filters, exclude=[int(i) for i in exclude or ()])
 
     def after_run(self) -> None:
         pass

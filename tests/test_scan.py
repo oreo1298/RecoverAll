@@ -164,3 +164,29 @@ def test_scanner_in_process(fat_image, tmp_path):
     finally:
         db.close()
         src.close()
+
+
+def test_recover_checked_folder_minus_a_subfolder(fat_image, tmp_path):
+    """Recovering a checked volume with one folder unchecked inside it: everything else, nothing from there."""
+    api = LocalAPI()
+    try:
+        scan = run(api, fat_image, {"mode": "quick"})
+        vol = next(v for v in api.scan_info(scan=scan)["volumes"] if v["fstype"] == "fat32")
+        docs = next(r for r in api.scan_children(scan=scan, parent=vol["root_id"])["rows"] if r["name"] == "Documents")
+        st = api.scan_selection(scan=scan, include=[vol["root_id"]], exclude=[docs["id"]])
+        want = {rel: data for rel, data in FILES.items() if not rel.startswith("Documents/")}
+        assert st["files"] == len(want) and st["bytes"] == sum(len(d) for d in want.values())
+        anc = api.scan_ancestors(scan=scan, entries=[docs["id"]])
+        assert anc == {str(docs["id"]): [vol["root_id"]]}
+        dest = tmp_path / "out"
+        job = api.start_recover(scan=scan, entries=[vol["root_id"]], exclude=[docs["id"]], dest=str(dest),
+                                options={}, filters={"hide_system": True})
+        res = wait_job(api, job["id"], 120)
+        assert res["state"] == "done", res.get("error")
+        assert res["result"]["files"] == len(want)
+        base = dest / "CARD (FAT32)"
+        for rel, data in want.items():
+            assert (base / recovered_name(rel)).read_bytes() == data, rel
+        assert not (base / "Documents").exists()
+    finally:
+        api.close()

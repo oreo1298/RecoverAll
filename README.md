@@ -244,8 +244,11 @@ RecoverAll refuses to recover onto the same disk.
 - **Recover files**: pick a disk or one partition and a search (*Quick*, *Deep*, *Signatures only*), then
   *Start scan*. The map shows what has been read. Then browse the results like a file manager. The folder
   tree is on the left, with *Lost files* (files whose folder is gone) under each volume, and the files
-  *Found by signature* as a volume of their own. Filter, check what you want, look at the preview, and
-  click *Recover checked…*. *Save scan…* keeps the results; *Open a scan file…* brings back an earlier one.
+  *Found by signature* as a volume of their own. Check what you want, in the table or the folder tree, and
+  click *Recover checked…*. Checking a folder takes everything in it, subfolders too. Untick something
+  inside a checked folder to leave just that out; the folder then shows as partly checked. The bar at the
+  bottom counts the files and the size that will be recovered. *Recover everything shown…* recovers what
+  the filters show instead. *Save scan…* keeps the results; *Open a scan file…* brings back an earlier one.
 - **Photos**: pick the card or disk and click *Find them*. Pick photos and videos in the gallery (or *Select
   all*) and click *Recover selected…*.
 - **Partitions**: pick the disk, *Quick search* or *Deep search* (when the quick one finds nothing), and

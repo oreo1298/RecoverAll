@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 import time
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QObject, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -79,25 +79,107 @@ def hexdump(data: bytes, base: int = 0) -> str:
     return "\n".join(out)
 
 
+class Selection(QObject):
+    """What is checked for recovery, the way R-Studio marks files: checking a folder takes everything in it,
+    subfolders too, and unchecking something inside a checked folder leaves just that out.
+
+    Only what the user marked is kept: INCLUDE (checked) and EXCLUDE (unchecked inside a checked folder),
+    each with the folders above it (nearest first). That is enough to show every row and folder as
+    checked, unchecked or partly checked without asking the scan, and the recovery gets the same two lists."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.include: dict[int, dict] = {}
+        self.exclude: dict[int, dict] = {}
+        self.chains: dict[int, tuple[int, ...]] = {}
+        self._on_below: dict[int, int] = {}     # folder → marked-checked entries under it
+        self._off_below: dict[int, int] = {}    # folder → marked-unchecked entries under it
+
+    def __bool__(self) -> bool:
+        return bool(self.include)
+
+    def clear(self) -> None:
+        if self.include or self.exclude:
+            self.include.clear()
+            self.exclude.clear()
+            self.chains.clear()
+            self._on_below.clear()
+            self._off_below.clear()
+            self.changed.emit()
+
+    def _inherited(self, chain) -> bool:
+        for a in chain:
+            if a in self.include:
+                return True
+            if a in self.exclude:
+                return False
+        return False
+
+    def is_checked(self, eid: int, chain) -> bool:
+        if eid in self.include:
+            return True
+        if eid in self.exclude:
+            return False
+        return self._inherited(chain)
+
+    def state(self, eid: int, chain) -> Qt.CheckState:
+        on = self.is_checked(eid, chain)
+        if (self._off_below if on else self._on_below).get(eid):
+            return Qt.PartiallyChecked
+        return Qt.Checked if on else Qt.Unchecked
+
+    def _unmark(self, eid: int) -> None:
+        on = self.include.pop(eid, None) is not None
+        off = self.exclude.pop(eid, None) is not None
+        below = self._on_below if on else self._off_below if off else None
+        for a in self.chains.pop(eid, ()):
+            if below is not None:
+                below[a] -= 1
+                if not below[a]:
+                    del below[a]
+
+    def set(self, items, on: bool) -> None:
+        """Check (ON) or uncheck each (row, chain) of ITEMS. A folder takes everything under it: what was
+        checked or unchecked inside it before no longer counts."""
+        for row, chain in items:
+            eid = int(row["id"])
+            if row.get("is_dir"):
+                inside = [m for m, ch in self.chains.items() if eid in ch]
+                for m in inside:
+                    self._unmark(m)
+            self._unmark(eid)
+            chain = tuple(int(a) for a in chain)
+            if on != self._inherited(chain):
+                (self.include if on else self.exclude)[eid] = row
+                self.chains[eid] = chain
+                below = self._on_below if on else self._off_below
+                for a in chain:
+                    below[a] = below.get(a, 0) + 1
+        self.changed.emit()
+
+
 class FileModel(QAbstractTableModel):
     """The files of one folder (or a search), loaded in pages through the bridge."""
 
     COLS = ["Name", "Size", "Modified", "Type", "State"]
-    checked_changed = Signal()
     loaded = Signal(int)                     # total
 
-    def __init__(self, bridge, parent=None):
+    def __init__(self, bridge, selection: Selection, parent=None):
         super().__init__(parent)
         self.bridge = bridge
+        self.sel = selection
         self.scan = ""
         self.rows: list[dict] = []
         self.total = 0
         self.mode = "folder"
         self.parent_id: int | None = None
+        self.chain: tuple[int, ...] = ()           # folder mode: the shown folder and the folders above it
+        self.anc: dict[int, tuple[int, ...]] = {}  # search mode: the folders above each row
         self.filters: dict = {}
         self.sort_key = "name"
         self.desc = False
-        self.checked: dict[int, dict] = {}
         self._gen = 0
         self._loading = False
         theme.changed.connect(lambda _p: self._refresh_view())
@@ -105,6 +187,39 @@ class FileModel(QAbstractTableModel):
     def _refresh_view(self) -> None:
         if self.rows:
             self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, self.columnCount() - 1))
+
+    def refresh_checks(self) -> None:
+        if self.rows:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.rows) - 1, 0), [Qt.CheckStateRole])
+
+    def row_chain(self, r: dict) -> tuple[int, ...]:
+        """The folders above row R, nearest first."""
+        if self.mode == "folder":
+            return self.chain
+        got = self.anc.get(r["id"])
+        if got is not None:
+            return got
+        return (r["parent"],) if r.get("parent") is not None else ()
+
+    def set_chain(self, chain) -> None:
+        self.chain = tuple(chain)
+        self.refresh_checks()
+
+    def _ancestors(self, rows: list[dict]) -> None:
+        """Search results come from anywhere: ask which folders are above them (to show checks inherited
+        from a checked folder)."""
+        want = [r["id"] for r in rows if r["id"] not in self.anc]
+        if not want:
+            return
+        gen = self._gen
+
+        def got(res):
+            if gen != self._gen:
+                return
+            for k, v in (res or {}).items():
+                self.anc[int(k)] = tuple(v)
+            self.refresh_checks()
+        self.bridge.call("scan_ancestors", done=got, error=lambda e: None, scan=self.scan, entries=want)
 
     def columnCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return len(self.COLS) + (1 if self.mode == "search" else 0)
@@ -119,10 +234,14 @@ class FileModel(QAbstractTableModel):
         return None
 
     def load(self, scan: str, mode: str, parent_id: int | None, filters: dict, sort: str | None = None,
-             desc: bool | None = None) -> None:
+             desc: bool | None = None, chain=None) -> None:
+        if scan != self.scan:
+            self.anc = {}
         self.scan = scan
         self.mode = mode
         self.parent_id = parent_id
+        if chain is not None:
+            self.chain = tuple(chain)
         self.filters = dict(filters)
         if sort is not None:
             self.sort_key = sort
@@ -151,6 +270,8 @@ class FileModel(QAbstractTableModel):
                 self.beginInsertRows(QModelIndex(), len(self.rows), len(self.rows) + len(rows) - 1)
                 self.rows.extend(rows)
                 self.endInsertRows()
+                if self.mode == "search":
+                    self._ancestors(rows)
             self.loaded.emit(self.total)
 
         def fail(e):
@@ -218,7 +339,7 @@ class FileModel(QAbstractTableModel):
             if col == 4 and not r["is_dir"] and (r["deleted"] or r["flags"] & F_CARVED):
                 return _dot(getattr(pal, CHANCE_TOKENS.get(r["chance"], "text_faint")))
         elif role == Qt.CheckStateRole and col == 0:
-            return Qt.Checked if r["id"] in self.checked else Qt.Unchecked
+            return self.sel.state(r["id"], self.row_chain(r))
         elif role == Qt.ForegroundRole:
             if r["deleted"] and col == 0:
                 return QColor(pal.text)
@@ -242,28 +363,50 @@ class FileModel(QAbstractTableModel):
         if role == Qt.CheckStateRole and index.column() == 0:
             r = self.rows[index.row()]
             on = value in (Qt.Checked, Qt.Checked.value, 2)
-            if on:
-                self.checked[r["id"]] = r
-            else:
-                self.checked.pop(r["id"], None)
-            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
-            self.checked_changed.emit()
+            self.sel.set([(r, self.row_chain(r))], on)
             return True
         return False
 
-    def check_all(self, on: bool) -> None:
-        for r in self.rows:
-            if on:
-                self.checked[r["id"]] = r
-            else:
-                self.checked.pop(r["id"], None)
-        self._refresh_view()
-        self.checked_changed.emit()
+    def all_rows(self, done, limit: int = 50_000) -> None:
+        """Every row of this listing (pages not loaded yet are fetched, and in a search the folders above
+        each row), then DONE(rows); DONE(None) when there are more than LIMIT."""
+        if self.total > limit:
+            done(None)
+            return
+        gen = self._gen
 
-    def clear_checks(self) -> None:
-        self.checked.clear()
-        self._refresh_view()
-        self.checked_changed.emit()
+        def finish():
+            need = [r["id"] for r in self.rows if r["id"] not in self.anc] if self.mode == "search" else []
+            if not need:
+                done(list(self.rows))
+                return
+
+            def anc(res):
+                if gen != self._gen:
+                    return
+                for k, v in (res or {}).items():
+                    self.anc[int(k)] = tuple(v)
+                done(list(self.rows))
+            self.bridge.call("scan_ancestors", done=anc, scan=self.scan, entries=need)
+
+        def got(res):
+            if gen != self._gen:
+                return
+            rest = res.get("rows") or []
+            if rest:
+                self.beginInsertRows(QModelIndex(), len(self.rows), len(self.rows) + len(rest) - 1)
+                self.rows.extend(rest)
+                self.endInsertRows()
+            finish()
+        n = self.total - len(self.rows)
+        if n <= 0:
+            finish()
+        elif self.mode == "search":
+            self.bridge.call("scan_search", done=got, scan=self.scan, filters=self.filters, offset=len(self.rows),
+                             limit=n, sort=self.sort_key, desc=self.desc)
+        elif self.parent_id is not None:
+            self.bridge.call("scan_children", done=got, scan=self.scan, parent=self.parent_id, offset=len(self.rows),
+                             limit=n, sort=self.sort_key, desc=self.desc, filters=self.filters)
 
 
 _DOTS: dict[str, QPixmap] = {}
@@ -427,7 +570,7 @@ class PreviewPanel(Card):
                 ",", " ")))
         self.grid.set_rows(rows)
         if e.get("is_dir"):
-            self.chance.setText("Recovering a folder recovers everything in it that the filters let through.")
+            self.chance.setText("Recovering a folder recovers everything in it, subfolders too.")
         elif e.get("deleted") or e.get("flags", 0) & F_CARVED:
             self.chance.setText(f"<b>Recovery chance: {CHANCE_TEXT.get(e.get('chance'), '?').lower()}.</b> "
                                 f"{CHANCE_HELP.get(e.get('chance'), '')}")
@@ -506,9 +649,9 @@ class PreviewPanel(Card):
 
 
 class ResultsView(QWidget):
-    """The browser. Signals: recover(ids, filters, what) and new_scan()."""
+    """The browser. Signals: recover(ids, filters, what, exclude) and new_scan()."""
 
-    recover = Signal(list, dict, str)
+    recover = Signal(list, dict, str, list)
     new_scan = Signal()
     save_scan = Signal(str)
 
@@ -521,6 +664,14 @@ class ResultsView(QWidget):
         self.folder: int | None = None
         self.folder_name = ""
         self._suppress = False
+        self.sel = Selection(self)
+        self.sel.changed.connect(self._sel_changed)
+        self._sel_stats: dict | None = None
+        self._sel_gen = 0
+        self._count_timer = QTimer(self, singleShot=True, interval=250)
+        self._count_timer.timeout.connect(self._count)
+        self._tree_busy = False
+        self._chains: dict[int, tuple[int, ...]] = {}
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
@@ -598,7 +749,7 @@ class ResultsView(QWidget):
         self.act_system = menu.addAction("Show filesystem metadata files")
         self.act_system.setCheckable(True)
         self.act_system.setChecked(gs.show_system)
-        self.act_system.toggled.connect(lambda _o: self.reload())
+        self.act_system.toggled.connect(lambda _o: (self.reload(), self._selection()))
         self.more.setMenu(menu)
         fbar.addWidget(self.more)
         lay.addLayout(fbar)
@@ -627,6 +778,7 @@ class ResultsView(QWidget):
         self.tree.setIconSize(QSize(18, 18))
         self.tree.itemExpanded.connect(self._expand)
         self.tree.currentItemChanged.connect(self._tree_select)
+        self.tree.itemChanged.connect(self._tree_checked)
         left.add(self.tree, 1)
         self.legend = QLabel()
         self.legend.setObjectName("Faint")
@@ -638,11 +790,12 @@ class ResultsView(QWidget):
         mid = Card("Files", "list")
         self.where = mid.add_header_widget(QLabel(""))
         self.where.setObjectName("Muted")
-        self.btn_all = mid.add_header_widget(icon_button("Check all", "check", "ghost", "Check every file shown"))
-        self.btn_all.clicked.connect(lambda: self.model.check_all(True))
+        self.btn_all = mid.add_header_widget(icon_button("Check all", "check", "ghost",
+                                                         "Check everything shown (a folder with all it holds)"))
+        self.btn_all.clicked.connect(self._check_all)
         self.btn_none = mid.add_header_widget(icon_button("None", "close", "ghost", "Uncheck everything"))
-        self.btn_none.clicked.connect(lambda: self.model.clear_checks())
-        self.model = FileModel(bridge, self)
+        self.btn_none.clicked.connect(self.sel.clear)
+        self.model = FileModel(bridge, self.sel, self)
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -668,11 +821,10 @@ class ResultsView(QWidget):
         self.table.customContextMenuRequested.connect(self._menu)
         mid.add(self.table, 1)
         self.model.loaded.connect(self._loaded)
-        self.model.checked_changed.connect(self._selection)
         split.addWidget(mid)
 
         self.preview = PreviewPanel(bridge)
-        self.preview.recover.connect(lambda i: self.recover.emit([i], self._file_filters(), "this file"))
+        self.preview.recover.connect(lambda i: self.recover.emit([i], self._sel_filters(), "this file", []))
         split.addWidget(self.preview)
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 5)
@@ -691,7 +843,8 @@ class ResultsView(QWidget):
         self.btn_shown = icon_button("Recover everything shown…", "trash_restore", "ghost",
                                      "Every file in this folder (and its subfolders) that the filters let through")
         self.btn_shown.clicked.connect(self._recover_shown)
-        self.btn_rec = icon_button("Recover checked…", "trash_restore", "primary")
+        self.btn_rec = icon_button("Recover checked…", "trash_restore", "primary",
+                                   "The checked files, and everything in the checked folders (subfolders too)")
         self.btn_rec.clicked.connect(self._recover_checked)
         self.btn_rec.setEnabled(False)
         bl.addWidget(self.btn_shown)
@@ -701,7 +854,8 @@ class ResultsView(QWidget):
     # ------------------------------------------------------------------ loading a scan
     def set_scan(self, scan: str) -> None:
         self.scan = scan
-        self.model.checked.clear()
+        self.sel.clear()
+        self._chains.clear()
         self.preview.clear()
         self.bridge.call("scan_info", done=self._got_info, scan=scan)
 
@@ -738,7 +892,11 @@ class ResultsView(QWidget):
             item.setIcon(0, theme.icon("search" if v.get("fstype") == "carved" else "partition", token))
             item.setData(0, Qt.UserRole, {"id": v["root_id"], "volume": v["id"], "name": text, "vol": True})
             item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, self.sel.state(v["root_id"], ()))
+            self._tree_busy = True
             self.tree.addTopLevelItem(item)
+            self._tree_busy = False
             # open on the volume with the most deleted files (not an empty EFI partition)
             score = (v.get("fstype") != "carved", v.get("deleted_files") or 0, v.get("files") or 0)
             if first is None or score > first_score:
@@ -763,7 +921,9 @@ class ResultsView(QWidget):
         if data.get("loaded"):
             return
         data["loaded"] = True
+        self._tree_busy = True
         item.setData(0, Qt.UserRole, data)
+        self._tree_busy = False
 
         def got(rows):
             for r in rows:
@@ -778,7 +938,11 @@ class ResultsView(QWidget):
                     child.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
                 else:
                     child.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
+                child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
+                child.setCheckState(0, self.sel.state(r["id"], (data["id"],) + self._item_chain(item)))
+                self._tree_busy = True
                 item.addChild(child)
+                self._tree_busy = False
             if not rows:
                 item.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
         self.bridge.call("scan_subdirs", done=got, scan=self.scan, parent=data["id"])
@@ -852,7 +1016,7 @@ class ResultsView(QWidget):
             self.model.load(self.scan, "search", None, f)
             self.where.setText(f"Search: {text}")
         elif self.folder is not None:
-            self.model.load(self.scan, "folder", self.folder, f)
+            self.model.load(self.scan, "folder", self.folder, f, chain=self._folder_chain(self.folder))
             self.where.setText(self.folder_name)
         self.table.horizontalHeader().setStretchLastSection(True)
         self._counts()
@@ -915,8 +1079,8 @@ class ResultsView(QWidget):
         rows = self._selected_rows()
         if rows:
             m.addAction(theme.icon("trash_restore"), f"Recover {len(rows)} selected…",
-                        lambda: self.recover.emit([x["id"] for x in rows], self._file_filters(),
-                                                  f"{len(rows)} selected items"))
+                        lambda: self.recover.emit([x["id"] for x in rows], self._sel_filters(),
+                                                  f"{len(rows)} selected items", []))
             m.addAction(theme.icon("check"), "Check the selected", lambda: self._check_rows(rows, True))
             m.addAction(theme.icon("close"), "Uncheck the selected", lambda: self._check_rows(rows, False))
         if r and r["is_dir"]:
@@ -932,35 +1096,138 @@ class ResultsView(QWidget):
         return out
 
     def _check_rows(self, rows: list[dict], on: bool) -> None:
-        for r in rows:
-            if on:
-                self.model.checked[r["id"]] = r
-            else:
-                self.model.checked.pop(r["id"], None)
-        self.model._refresh_view()
+        self.sel.set([(r, self.model.row_chain(r)) for r in rows], on)
+
+    def _check_all(self) -> None:
+        def got(rows):
+            if rows is None:
+                self.bridge.message.emit("Too many to check one by one: “Recover everything shown” takes them all",
+                                         "warning")
+                return
+            self.sel.set([(r, self.model.row_chain(r)) for r in rows], True)
+        self.model.all_rows(got)
+
+    # ------------------------------------------------------------------ the checked selection
+    def _sel_filters(self) -> dict:
+        """What a checked selection goes through: only the metadata-files switch (checked is checked,
+        whatever the view filters show)."""
+        return {"hide_system": not self.act_system.isChecked()}
+
+    def _item_chain(self, item: QTreeWidgetItem) -> tuple[int, ...]:
+        """The folders above a tree item, nearest first."""
+        out = []
+        p = item.parent()
+        while p is not None:
+            d = p.data(0, Qt.UserRole) or {}
+            if "id" in d:
+                out.append(d["id"])
+            p = p.parent()
+        return tuple(out)
+
+    def _folder_chain(self, fid: int) -> tuple[int, ...]:
+        """The shown folder and the folders above it, for its rows' check marks: from the tree when the
+        folder is there, else asked once from the scan."""
+        cur = self.tree.currentItem()
+        if cur is not None and (cur.data(0, Qt.UserRole) or {}).get("id") == fid:
+            self._chains[fid] = self._item_chain(cur)
+        if fid in self._chains:
+            return (fid,) + self._chains[fid]
+
+        def got(res):
+            self._chains[fid] = tuple((res or {}).get(str(fid)) or ())
+            if self.model.mode == "folder" and self.model.parent_id == fid:
+                self.model.set_chain((fid,) + self._chains[fid])
+        self.bridge.call("scan_ancestors", done=got, error=lambda e: None, scan=self.scan, entries=[fid])
+        return (fid,)
+
+    def _tree_checked(self, item: QTreeWidgetItem, column: int) -> None:
+        if self._tree_busy or column != 0:
+            return
+        d = item.data(0, Qt.UserRole) or {}
+        if "id" not in d:
+            return
+        # itemChanged also fires for text, icon and data changes: only a box that now differs from the
+        # selection is the user's click (a click on a partly checked box checks it)
+        chain = self._item_chain(item)
+        new = item.checkState(0)
+        if new == Qt.PartiallyChecked or new == self.sel.state(d["id"], chain):
+            return
+        self.sel.set([({"id": d["id"], "name": d.get("name") or "", "is_dir": True, "size": 0}, chain)],
+                     new == Qt.Checked)
+
+    def _refresh_tree(self) -> None:
+        self._tree_busy = True
+        try:
+            def walk(item: QTreeWidgetItem, chain: tuple[int, ...]) -> None:
+                d = item.data(0, Qt.UserRole) or {}
+                if "id" in d:
+                    st = self.sel.state(d["id"], chain)
+                    if item.checkState(0) != st:
+                        item.setCheckState(0, st)
+                    chain = (d["id"],) + chain
+                for i in range(item.childCount()):
+                    walk(item.child(i), chain)
+            for i in range(self.tree.topLevelItemCount()):
+                walk(self.tree.topLevelItem(i), ())
+        finally:
+            self._tree_busy = False
+
+    def _sel_changed(self) -> None:
+        self.model.refresh_checks()
+        self._refresh_tree()
         self._selection()
 
     def _selection(self) -> None:
-        ch = list(self.model.checked.values())
-        if not ch:
+        self._sel_gen += 1
+        self._sel_stats = None
+        if not self.sel:
+            self._count_timer.stop()
             self.sel_text.setText("Check the files and folders to recover, or recover everything shown.")
             self.btn_rec.setEnabled(False)
             return
-        files = [r for r in ch if not r["is_dir"]]
-        dirs = len(ch) - len(files)
-        size = sum(r["size"] for r in files)
-        parts = []
-        if files:
-            parts.append(f"{len(files):,} file{'s' if len(files) != 1 else ''} ({fmt_bytes(size)})".replace(",", " "))
-        if dirs:
-            parts.append(f"{dirs} folder{'s' if dirs != 1 else ''}")
-        self.sel_text.setText("Checked: " + " and ".join(parts))
+        self.sel_text.setText("Checked: counting…")
         self.btn_rec.setEnabled(True)
+        self._count_timer.start()
+
+    def _count(self) -> None:
+        if not self.sel or not self.scan:
+            return
+        gen = self._sel_gen
+
+        def got(st):
+            if gen != self._sel_gen:
+                return
+            self._sel_stats = st
+            n = st.get("files") or 0
+            if not n:
+                self.sel_text.setText("Checked: no files (the checked folders are empty, or hold only empty files)")
+                self.btn_rec.setEnabled(False)
+                return
+            text = f"{n:,} file{'s' if n != 1 else ''} ({fmt_bytes(st.get('bytes'))})".replace(",", " ")
+            d = st.get("deleted") or 0
+            extra = f" · {d:,} deleted".replace(",", " ") if d else ""
+            if self.sel.exclude:
+                k = len(self.sel.exclude)
+                extra += f" · {k} item{'s' if k != 1 else ''} left out"
+            self.sel_text.setText(f"Checked: {text}{extra}")
+            self.btn_rec.setEnabled(True)
+
+        def fail(e):
+            if gen == self._sel_gen:
+                self.sel_text.setText("Checked: (couldn't count them)")
+        self.bridge.call("scan_selection", done=got, error=fail, scan=self.scan, include=list(self.sel.include),
+                         exclude=list(self.sel.exclude), filters=self._sel_filters())
 
     def _recover_checked(self) -> None:
-        ids = list(self.model.checked)
-        if ids:
-            self.recover.emit(ids, self._file_filters(), self.sel_text.text().replace("Checked: ", ""))
+        if not self.sel:
+            return
+        st = self._sel_stats
+        if st:
+            n = st.get("files") or 0
+            what = f"{n:,} file{'s' if n != 1 else ''} ({fmt_bytes(st.get('bytes'))})".replace(",", " ")
+        else:
+            what = "the checked files and folders"
+        self.recover.emit(list(self.sel.include), self._sel_filters(), what, list(self.sel.exclude))
 
     def _recover_shown(self) -> None:
         f = self._file_filters()
@@ -968,9 +1235,9 @@ class ResultsView(QWidget):
             # every volume, through the same filters as the search (the name too)
             f["name"] = self.search.text().strip()
             ids = [v["root_id"] for v in self.info.get("volumes") or [] if v.get("root_id")]
-            self.recover.emit(ids, f, f"the {self.model.total:,} files the search found".replace(",", " "))
+            self.recover.emit(ids, f, f"the {self.model.total:,} files the search found".replace(",", " "), [])
         elif self.folder is not None:
-            self.recover.emit([self.folder], f, f"everything in {self.folder_name or 'this folder'}")
+            self.recover.emit([self.folder], f, f"everything in {self.folder_name or 'this folder'}", [])
 
     def clear(self) -> None:
         self.scan = ""

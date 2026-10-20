@@ -112,6 +112,66 @@ def test_scan_browse_recover(window):
     assert page.outer.currentIndex() == 2          # back to the results
 
 
+def test_checking_a_folder_checks_everything_in_it(window):
+    window._action("recover", "/dev/sda")
+    page = window.recover
+    pump(0.3)
+    page.mode.set_value("deep")
+    page.start()
+    assert finish(page) == "done"
+    res = page.results
+    assert wait_for(lambda: res.model.total > 0, 10)
+    db = window.bridge.api._scan(res.scan)
+
+    def state(i):
+        return res.model.data(res.model.index(i, 0), Qt.CheckStateRole)
+
+    def counted():
+        return res.sel_text.text().startswith("Checked: ") and "counting" not in res.sel_text.text()
+    i = next(k for k, r in enumerate(res.model.rows) if r["name"] == "Photos")
+    photos = res.model.rows[i]
+    res.model.setData(res.model.index(i, 0), Qt.Checked, Qt.CheckStateRole)
+    n = len(list(db.subtree(photos["id"], {"hide_system": True})))
+    assert wait_for(counted, 5) and f"Checked: {n} files" in res.sel_text.text()
+    # inside the checked folder everything shows checked; one subfolder unchecked is left out
+    res._open(res.model.index(i, 0))
+    assert wait_for(lambda: res.model.parent_id == photos["id"] and res.model.rows, 10)
+    assert all(state(k) == Qt.Checked for k in range(len(res.model.rows)))
+    j = next(k for k, r in enumerate(res.model.rows) if r["name"] == "2019")
+    res.model.setData(res.model.index(j, 0), Qt.Unchecked, Qt.CheckStateRole)
+    left_out = len(list(db.subtree(res.model.rows[j]["id"], {"hide_system": True})))
+    assert wait_for(lambda: counted() and f"Checked: {n - left_out} files" in res.sel_text.text(), 5)
+    top = res.tree.topLevelItem(0)
+    tree_photos = next(top.child(k) for k in range(top.childCount()) if top.child(k).text(0) == "Photos")
+    assert tree_photos.checkState(0) == Qt.PartiallyChecked and top.checkState(0) == Qt.PartiallyChecked
+    excluded = dict(res.sel.exclude)
+    tree_photos.setExpanded(True)                      # loads its subfolders: the selection must not change
+    assert wait_for(lambda: tree_photos.childCount() > 0, 10)
+    pump(0.3)
+    assert res.sel.exclude == excluded and photos["id"] in res.sel.include
+    tree_2019 = next(tree_photos.child(k) for k in range(tree_photos.childCount())
+                     if tree_photos.child(k).text(0) == "2019")
+    assert tree_2019.checkState(0) == Qt.Unchecked
+    # checking in the tree works too, and a search shows what a checked folder holds as checked
+    docs = next(top.child(k) for k in range(top.childCount()) if top.child(k).text(0) == "Documents")
+    docs.setCheckState(0, Qt.Checked)
+    assert docs.data(0, Qt.UserRole)["id"] in res.sel.include
+    res.search.setText("IMG_2021")
+    assert wait_for(lambda: res.model.mode == "search" and res.model.rows and state(0) == Qt.Checked, 10)
+    res.search.setText("IMG_2019")
+    assert wait_for(lambda: res.model.mode == "search" and res.model.rows and state(0) == Qt.Unchecked, 10)
+    # what is recovered is exactly what was counted
+    want = db.selection(list(res.sel.include), list(res.sel.exclude), {"hide_system": True})
+    assert wait_for(counted, 5) and f"Checked: {len(want)} files" in res.sel_text.text()
+    res._recover_checked()
+    assert wait_for(lambda: page.jobview.job is not None and page.jobview.job.get("kind") == "recover"
+                    and page.jobview.job.get("state") != "running", 30)
+    assert window.bridge.api.job(job_id=page.jobview.job["id"])["result"]["files"] == len(want)
+    page.jobview.btn_done.click()
+    res.btn_none.click()
+    assert not res.sel and res.btn_rec.isEnabled() is False
+
+
 def test_photos(window):
     window._action("photos", "/dev/mmcblk0")
     page = window.photos

@@ -685,12 +685,10 @@ class DemoAPI(LocalAPI):
                 out[str(i)] = {"data": base64.b64encode(scene(seed, 192, 128)).decode(), "embedded": True}
         return out
 
-    def start_recover(self, scan: str, entries: list[int], dest: str, options=None, filters=None) -> dict:
+    def start_recover(self, scan: str, entries: list[int], dest: str, options=None, filters=None,
+                      exclude=None) -> dict:
         db = self._scan(scan)
-        ids = []
-        for i in entries:
-            ids.extend(db.subtree(int(i), filters))
-        ids = list(dict.fromkeys(ids))
+        ids = db.selection([int(i) for i in entries], [int(i) for i in exclude or ()], filters)
         total = 0
         for i in ids:
             total += db.entry(i)["size"]

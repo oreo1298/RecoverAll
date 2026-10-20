@@ -218,15 +218,10 @@ class Recovery:
                         stats={"done": self.done_bytes, "total": total, "rate": rate, "eta": eta, "label": "Recovered"},
                         force=force)
 
-    def run(self, ids: list[int], filters: dict | None = None) -> dict:
+    def run(self, ids: list[int], filters: dict | None = None, exclude: list[int] | None = None) -> dict:
+        """Recover IDS (files, and folders with everything under them) except what lies under EXCLUDE."""
         self.t0 = time.monotonic()
-        files: list[int] = []
-        seen = set()
-        for i in ids:
-            for fid in self.db.subtree(int(i), filters):
-                if fid not in seen:
-                    seen.add(fid)
-                    files.append(fid)
+        files = self.db.selection([int(i) for i in ids], [int(i) for i in exclude or ()], filters)
         rows = []
         for fid in files:
             r = self.db.conn.execute("SELECT id, vol, parent, name, size, flags, deleted, chance FROM entries WHERE id = ?",
@@ -338,9 +333,9 @@ def _unlink(p: str) -> None:
 
 
 def run_recover(job, db: ScanDB, src: Source, ids: list[int], dest: str, options: dict | None = None,
-                filters: dict | None = None, source_spec=None) -> dict:
+                filters: dict | None = None, source_spec=None, exclude: list[int] | None = None) -> dict:
     from .jobs import JobControl
     if source_spec is not None:
         check_destination(source_spec, dest)
     rec = Recovery(db, src, dest, options, JobControl(job) if job is not None else None, job)
-    return rec.run(ids, filters)
+    return rec.run(ids, filters, exclude)

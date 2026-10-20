@@ -28,7 +28,8 @@ log = logging.getLogger(__name__)
 
 READ_METHODS = {
     "hello", "list_disks", "disk_detail", "open_image", "tool_list", "formats", "scans", "scan_info", "scan_children",
-    "scan_subdirs", "scan_search", "scan_counts", "scan_entry", "preview", "thumbnails", "read_bytes",
+    "scan_subdirs", "scan_search", "scan_counts", "scan_entry", "scan_selection", "scan_ancestors", "preview",
+    "thumbnails", "read_bytes",
     "partition_table", "plan_partitions", "diagnose", "fsck_actions", "list_backups", "raid_from_md",
     "raid_describe", "file_analyze", "jobs", "job", "history", "subscribe", "unlocked",
 }
@@ -238,6 +239,15 @@ class LocalAPI:
     def scan_counts(self, scan: str, filters: dict | None = None) -> dict:
         return self._scan(scan).counts(filters)
 
+    def scan_selection(self, scan: str, include: list[int], exclude: list[int] | None = None,
+                       filters: dict | None = None) -> dict:
+        """Files, bytes and deleted files of a checked selection (folders count with everything in them)."""
+        return self._scan(scan).selection_stats(include, exclude or [], filters)
+
+    def scan_ancestors(self, scan: str, entries: list[int]) -> dict:
+        """The folders above each entry, nearest first ({"id": [parent, grandparent, ...]})."""
+        return {str(k): v for k, v in self._scan(scan).ancestors(entries).items()}
+
     def scan_entry(self, scan: str, entry: int) -> dict:
         db = self._scan(scan)
         e = db.entry(int(entry))
@@ -333,7 +343,8 @@ class LocalAPI:
 
     # ------------------------------------------------------------------ recovering files
     def start_recover(self, scan: str, entries: list[int], dest: str, options: dict | None = None,
-                      filters: dict | None = None) -> dict:
+                      filters: dict | None = None, exclude: list[int] | None = None) -> dict:
+        """Recover ENTRIES (folders with everything in them) except what lies under EXCLUDE, through FILTERS."""
         db = self._scan(scan)
         meta = db.meta("source") or {}
         spec = meta.get("spec")
@@ -346,7 +357,8 @@ class LocalAPI:
         title = f"Recover {n} item{'s' if n != 1 else ''} → {dest}"
 
         def fn(job: Job):
-            return run_recover(job, db, src, [int(i) for i in entries], dest, options, filters, spec)
+            return run_recover(job, db, src, [int(i) for i in entries], dest, options, filters, spec,
+                               [int(i) for i in exclude or ()])
         job = self.runner.start("recover", [f"recover:{os.path.realpath(dest)}"], title, fn,
                                 {"scan": scan, "dest": dest, "count": n, "options": options or {}})
         return job.public()

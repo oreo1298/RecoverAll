@@ -242,6 +242,7 @@ QCheckBox::indicator { width: 17px; height: 17px; border-radius: 5px;
 QCheckBox::indicator:hover { border-color: $accent; }
 QCheckBox::indicator:checked { background: $accent; border-color: $accent; image: url("$check"); }
 QCheckBox::indicator:checked:disabled { background: $border_strong; border-color: $border_strong; }
+QCheckBox::indicator:indeterminate { background: $accent; border-color: $accent; image: url("$partial"); }
 QRadioButton::indicator { width: 14px; height: 14px; border-radius: 8px;
                           border: 1px solid $border_strong; background: $surface_alt; }
 QRadioButton::indicator:hover { border-color: $accent; }
@@ -299,6 +300,8 @@ QTreeView::indicator, QListView::indicator, QTableView::indicator {
 QTreeView::indicator:hover, QListView::indicator:hover { border-color: $accent; }
 QTreeView::indicator:checked, QListView::indicator:checked, QTableView::indicator:checked {
     background: $accent; border-color: $accent; image: url("$check"); }
+QTreeView::indicator:indeterminate, QListView::indicator:indeterminate, QTableView::indicator:indeterminate {
+    background: $accent; border-color: $accent; image: url("$partial"); }
 QHeaderView { background: transparent; }
 QHeaderView::section { background: $surface; color: $text_muted; border: none;
     border-bottom: 1px solid $border; padding: 7px 8px; font-weight: 600; }
@@ -421,6 +424,7 @@ class ThemeManager(QObject):
                 "chevron": icons.write_svg_file(directory, "chevron_down", p.text_muted),
                 "chevron_faint": icons.write_svg_file(directory, "chevron_down", p.text_faint),
                 "check": icons.write_svg_file(directory, "check", p.accent_text, 3.0),
+                "partial": icons.write_svg_file(directory, "minus", p.accent_text, 3.0),
             }
 
         try:

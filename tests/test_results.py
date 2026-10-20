@@ -76,3 +76,40 @@ def test_runs_pack():
     runs = [(0, 10), (-1, 4096), (2 ** 40, 7)]
     assert unpack_runs(pack_runs(runs)) == runs
     assert unpack_runs(None) == []
+
+
+def test_checked_selection(tmp_path):
+    """Checking a folder takes everything under it; unchecking inside it leaves just that out; something
+    checked again inside the left-out part still counts."""
+    db = ScanDB.create(tmp_path / "s.rascan", {"spec": "/dev/x"})
+    v = db.add_volume(name="D:", fstype="ntfs", offset=0, size=10 ** 9, origin="table", status="existing")
+    with db.writer(v) as w:
+        w.add(Entry(5, None, "", is_dir=True))
+        w.add(Entry(10, 5, "Photos", is_dir=True))
+        w.add(Entry(11, 10, "2019", is_dir=True))
+        w.add(Entry(12, 11, "a.jpg", size=100, runs=[(4096, 100)], deleted=True, chance=3))
+        w.add(Entry(13, 11, "keep.jpg", size=200, runs=[(8192, 200)]))
+        w.add(Entry(14, 10, "2020", is_dir=True))
+        w.add(Entry(15, 14, "b.jpg", size=300, runs=[(12288, 300)]))
+        w.add(Entry(16, 14, "empty.txt", size=0))
+        w.add(Entry(17, 10, "top.jpg", size=400, runs=[(16384, 400)]))
+        w.add(Entry(18, 5, "$Bitmap", size=50, data=bytes(50), flags=F_SYSTEM))
+    ids = dict(db.conn.execute("SELECT name, id FROM entries WHERE name != ''").fetchall())
+    photos = ids["Photos"]
+    root = db.volume(v)["root_id"]
+    names = lambda sel: sorted(db.entry(i)["name"] for i in sel)          # noqa: E731
+
+    assert names(db.selection([photos])) == ["a.jpg", "b.jpg", "empty.txt", "keep.jpg", "top.jpg"]
+    # 2019 unchecked inside the checked Photos folder, then keep.jpg checked again inside 2019
+    assert names(db.selection([photos], [ids["2019"]])) == ["b.jpg", "empty.txt", "top.jpg"]
+    assert names(db.selection([photos, ids["keep.jpg"]], [ids["2019"]])) == ["b.jpg", "empty.txt", "keep.jpg",
+                                                                             "top.jpg"]
+    # metadata files only with hide_system off; empty files aren't counted (recovery skips them)
+    assert "$Bitmap" not in names(db.selection([root], [], {"hide_system": True}))
+    assert "$Bitmap" in names(db.selection([root], [], {"hide_system": False}))
+    st = db.selection_stats([photos], [ids["2019"]])
+    assert st == {"files": 2, "bytes": 700, "deleted": 0}
+    assert db.selection_stats([]) == {"files": 0, "bytes": 0, "deleted": 0}
+    # the folders above an entry, nearest first
+    anc = db.ancestors([ids["a.jpg"], photos, root])
+    assert anc == {ids["a.jpg"]: [ids["2019"], photos, root], photos: [root], root: []}
