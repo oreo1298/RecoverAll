@@ -294,3 +294,28 @@ def test_random_data_speed_and_false_positives():
     print(f"\n64 MiB of random data, {len(carver.formats)} formats: {elapsed:.2f} s, {len(files)} files")
     assert elapsed < 2.0
     assert len(files) <= 2          # other modules' weak signatures may very rarely match
+
+
+def parse_split(r: Reader) -> Hit | None:
+    """"SPLT" + u32 first-piece length + u32 gap: the rest of the file lies GAP bytes further on."""
+    h = r.read(0, 12)
+    first, gap = struct.unpack_from("<II", h, 4)
+    return Hit("spl", None, CHANCE_FAIR, runs=[(0, first), (first + gap, 1024)])
+
+
+SPLIT = Format("split", "Fragmented", "other", ("spl",), ((0, b"SPLT"),), parse_split, min_size=16)
+
+
+def test_fragmented_files():
+    """A parser that finds where a file's data goes on returns its pieces; they come back in order, the
+    length is their sum, and only the first piece is skipped by the search."""
+    head = b"SPLT" + struct.pack("<II", 1024, 4096) + bytes(1012)
+    data = plant(64 * 1024, {2048: head, 2048 + 1024 + 4096: bytes(1024), 4096: box(64)})
+    files = scan(data, [SPLIT, BOX])
+    split = next(f for f in files if f.key == "split")
+    assert split.pieces() == [(2048, 1024), (2048 + 1024 + 4096, 1024)]
+    assert split.length == 2048 and split.offset == 2048
+    assert any(f.key == "box" and f.offset == 4096 for f in files)     # the gap is searched
+    # a piece past the end of the source is cut there
+    files = scan(data[:2048 + 1024 + 4096 + 100], [SPLIT])
+    assert files[0].pieces()[-1] == (2048 + 1024 + 4096, 100)

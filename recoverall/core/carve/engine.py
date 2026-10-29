@@ -56,10 +56,15 @@ class CarvedFile:
     mtime: float | None = None
     chance: int = CHANCE_FAIR
     info: dict | None = None
+    runs: list[tuple[int, int]] | None = None   # a fragmented file: (offset in the source, length) pieces
 
     @property
     def end(self) -> int:
         return self.offset + self.length
+
+    def pieces(self) -> list[tuple[int, int]]:
+        """Where the file's bytes are in the scanned source, in order."""
+        return list(self.runs) if self.runs else [(self.offset, self.length)]
 
     @property
     def filename(self) -> str:
@@ -288,6 +293,9 @@ class Carver:
 
     def _accept(self, pos: int, f: Format, hit: Hit, out: list[CarvedFile]) -> None:
         self._close_open(pos, out)
+        if hit.runs:
+            self._accept_fragments(pos, f, hit, out)
+            return
         if hit.length is None:
             self._open = (pos, f, hit)
             return
@@ -299,6 +307,26 @@ class Carver:
         out.append(self._make(pos, length, f, hit, chance))
         if self.skip_inside:
             self._skip_until = max(self._skip_until, pos + length)
+
+    def _accept_fragments(self, pos: int, f: Format, hit: Hit, out: list[CarvedFile]) -> None:
+        """A file put back together from pieces (the parser found where its data went on)."""
+        runs = []
+        for off, n in hit.runs:
+            a = pos + int(off)
+            n = min(int(n), self.src.size - a)
+            if a < 0 or n <= 0:
+                continue
+            runs.append((a, n))
+        if not runs or runs[0][0] != pos:
+            return
+        length = sum(n for _a, n in runs)
+        if length < max(1, f.min_size):
+            return
+        cf = self._make(pos, length, f, hit, hit.chance if length <= f.max_size else CHANCE_POOR)
+        cf.runs = runs if len(runs) > 1 else None
+        out.append(cf)
+        if self.skip_inside:                      # only the first piece is known to be this file's alone
+            self._skip_until = max(self._skip_until, runs[0][0] + runs[0][1])
 
     def _close_open(self, at: int, out: list[CarvedFile], cut: bool = False) -> None:
         if self._open is None:

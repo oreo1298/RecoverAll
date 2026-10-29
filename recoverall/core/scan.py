@@ -561,7 +561,9 @@ class Scanner:
             w.add(Entry(key=typekey, parent=catkey, name=f"{(cf.description or cf.ext.upper())} (.{cf.ext})",
                         is_dir=True))
             self.carved_folders.add(typekey)
-        runs = mapper(cf.offset, cf.length) if mapper else [(cf.offset, cf.length)]
+        runs = []
+        for off, n in cf.pieces():
+            runs.extend(mapper(off, n) if mapper else [(off, n)])
         base = cf.name or f"f{runs[0][0] // 512:010d}"
         info = {"desc": cf.description, "format": cf.key}
         if cf.info:

@@ -53,6 +53,9 @@ class Hit:
     info: dict | None = None         # shown in the preview: {"width": .., "height": .., "camera": .., ...}
     category: str | None = None      # overrides Format.category (a ZIP that is a .docx is a document)
     description: str | None = None   # overrides Format.name ("Word document" for a ZIP)
+    # a fragmented file put back together: its pieces in order, as (offset from the candidate, length); the
+    # first one starts at the candidate (offset 0), and ``length`` is their sum
+    runs: list[tuple[int, int]] | None = None
 
 
 class Reader:
