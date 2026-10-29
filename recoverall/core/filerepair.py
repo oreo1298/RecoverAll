@@ -5,8 +5,9 @@ damaged in a few typical ways, and most of them can be put right because the for
 
 =============  ===================================================================================================
 JPEG           other data before the start marker (cut); data after the end marker (cut; a camera's second
-               image or a motion-photo video after it is kept); no end marker (added: the readable part shows,
-               the rest is grey, and how much is missing is said); picture data damaged inside, found exactly
+               image or a motion-photo video after it is kept); cut short (the missing MCUs are coded as grey with
+               the photo's own tables, restart markers included: the photo keeps its size, opens everywhere,
+               and how much is missing is said); picture data damaged inside, found exactly
                by decoding it (media/jpegdec.py): with restart markers the damaged intervals are replaced by
                grey ones coded with the photo's own tables and the rest shows in its place, without them the
                photo is kept up to the last good MCU and the rest filled with grey; a progressive photo is
@@ -15,6 +16,9 @@ JPEG           other data before the start marker (cut); data after the end mark
                or taken from a REFERENCE photo of the same camera and size); no Huffman tables (MJPEG frames
                from AVI files: the standard tables of JPEG Annex K are inserted); nothing of the photo left
                (its embedded preview — EXIF thumbnail or MPF picture — is saved instead).
+RAW, HEIC      camera RAW files (CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, DNG, SRW...) and HEIC photos that
+               can't be developed: the largest embedded preview that decodes completely is saved as
+               "<name> (preview).jpg" (media/rawpreview.py).
 PNG            wrong checksums (recomputed), data after IEND (cut), a damaged signature (rewritten), cut-short or
                damaged image data: the readable rows are kept, the rest is black, all in one new IDAT.
 GIF            cut short (the frame that is there is closed and the trailer added), data after the trailer.
@@ -640,6 +644,41 @@ def _jpeg_cut(buf, dec, good_end: int, good_bit: int, start: int, mcus: int, pre
     return out
 
 
+def _jpeg_fill(buf, dec, start: int) -> list | None:
+    """A baseline photo whose data simply stops: the data up to its last good MCU, then the rest of its MCUs as
+    grey and the end marker; None when that can't be coded (progressive photos, tables without the codes)."""
+    if not (dec.supported and len(dec.scans) == 1 and not dec.progressive):
+        return None
+    first = dec.scans[0]
+    if not 0 < first.decoded < first.total:
+        return None
+    part = (buf[dec.good_end] >> (8 - dec.good_bit), dec.good_bit) if dec.good_bit and dec.good_end < len(buf) \
+        else (0, 0)
+    total, done, ri = first.total, first.decoded, dec.restart_interval
+    if not ri or ri >= total:
+        grey = dec.grey(total - done, dec.preds, part)
+        return None if grey is None else [(start, dec.good_end), grey, b"\xff\xd9"]
+    # with restart intervals: finish the interval the data stops in, then every later one after its marker
+    # (the DC predictors start again from 0 in each)
+    cur = (done - 1) // ri
+    good = dec.good_end
+    if done % ri == 0 and not dec.good_bit and bytes(buf[good - 2:good]) == bytes((0xFF, 0xD0 + cur % 8)):
+        good -= 2                    # the data stops just after that interval's restart marker: it is written below
+    pieces: list = [(start, good)]
+    rest = min((cur + 1) * ri, total) - done
+    tail = dec.grey(rest, dec.preds, part)
+    if tail is None:
+        return None
+    pieces.append(tail)
+    for k in range(cur + 1, -(-total // ri)):
+        n = min(ri, total - k * ri)
+        grey = dec.grey(n)
+        if grey is None:
+            return None
+        pieces += [bytes((0xFF, 0xD0 + (k - 1) % 8)), grey]
+    return pieces + [b"\xff\xd9"]
+
+
 def _jpeg_interval(dec, seg: bytes, j: int):
     """SEG decoded as restart interval J of the photo: (whether all of it decodes and fits exactly, the
     jpegdec Probe)."""
@@ -954,6 +993,7 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
     # the picture data, checked by decoding it when it has no end, could take another header, or looks damaged
     # (not when its start is a guess)
     data: list | None = None
+    dec = None
     if "data_offset" not in plan.info:
         from .media import jpegdec
         hdr = _jpeg_bytes(buf, header)
@@ -998,15 +1038,23 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
             plan.note = "The repaired copy is the small preview the camera stored in the photo."
             return plan
         more = f": {_missing(shown)}" if shown is not None else ""
+        # the missing part coded as grey with the photo's own tables: a complete photo every viewer opens
+        grey = _jpeg_fill(buf, dec, data_start) if dec is not None else None
+        filled = " and fill the missing part with grey: the photo keeps its size and opens everywhere"
         if why == "file":
             plan.problem("The photo has no end: another file starts in the middle of it" + more,
-                         "End the photo where the other file starts (the missing part shows grey)")
+                         "End the photo where the other file starts" + (filled if grey else
+                                                                         " (the missing part shows grey)"))
         elif why == "damaged":
             plan.problem(f"The picture data is damaged from byte {data_end} on" + more,
-                         "Keep the picture data up to the damage and end the photo there (the rest shows grey)")
+                         "Keep the picture data up to the damage" + (filled if grey else
+                                                                     " and end the photo there (the rest shows grey)"))
         else:
             plan.problem("The photo is cut short (no end marker)" + more,
-                         "Add the end marker: the part that is there shows, the rest is grey")
+                         "Keep the part that is there" + (filled if grey else
+                                                          ", add the end marker: the rest shows grey"))
+        if grey is not None:
+            data = grey
     if data is None:
         data = [(data_start, data_end), b"" if eoi else b"\xff\xd9"]
     pieces = _merge([*header, *data, (data_end, tail_keep) if tail_keep else b""])

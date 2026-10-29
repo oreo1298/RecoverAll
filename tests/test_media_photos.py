@@ -216,7 +216,12 @@ def test_repair_cut_short_says_how_much_is_missing(photos, tmp_path):
     a, r, out, _p = fix(tmp_path, "cut.jpg", data[:len(data) * 6 // 10])
     assert "cut short" in a["problems"][0] and "% of the photo is missing" in a["problems"][0]
     assert 0.4 < a["info"]["shown"] < 0.75
-    assert out == data[:len(data) * 6 // 10] + b"\xff\xd9"
+    kept = data[:len(data) * 6 // 10]
+    assert out[:len(kept) - 64] == kept[:len(kept) - 64] and out[-2:] == b"\xff\xd9"
+    res = jpegdec.decode_check(out)                  # a complete photo: the missing part is grey
+    assert res.ok and res.mcus_decoded == res.mcus_total
+    ok, errors = decode_check(_p)                    # and every decoder opens it without complaint
+    assert ok, errors
 
 
 def test_repair_damage_without_restart_markers(photos, tmp_path):

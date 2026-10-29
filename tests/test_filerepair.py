@@ -239,20 +239,28 @@ def test_jpeg_garbage_around(tmp_path):
     assert out == photo() and "zeros" in r["problems"][0]
 
 
+def complete_photo(out: bytes, kept: bytes) -> None:
+    """OUT keeps (nearly all of) KEPT and is a complete photo of full size: its missing part is coded grey."""
+    from recoverall.core.media import jpegdec
+    assert out[:len(kept) - 64] == kept[:len(kept) - 64]
+    assert jpeg_walk(out) == (96, 72)
+    res = jpegdec.decode_check(out)
+    assert res.ok and res.mcus_decoded == res.mcus_total, res.error_reason
+    im = decoded(out)
+    assert im is None or im.size == (96, 72)
+
+
 def test_jpeg_cut_short(tmp_path):
     a, r, out = fix(tmp_path, "cut.jpg", photo()[:6000])
-    assert "cut short" in a["problems"][0]
-    assert out == photo()[:6000] + b"\xff\xd9"
-    assert jpeg_walk(out) == (96, 72)
+    assert "cut short" in a["problems"][0] and "grey" in a["actions"][0]
+    complete_photo(out, photo()[:6000])
     # a cut-short file padded with zeros (the rest of its last cluster): the zeros go
     _a, _r, out = fix(tmp_path, "cut0.jpg", photo()[:6000] + bytes(4096))
-    assert out == photo()[:6000] + b"\xff\xd9"
+    complete_photo(out, photo()[:6000])
     # another photo starts where this one's data stops
     a, _r, out = fix(tmp_path, "two.jpg", photo()[:6000] + thumb())
     assert "another file" in a["problems"][0]
-    assert out == photo()[:6000] + b"\xff\xd9"
-    im = decoded(out)
-    assert im is None or im.size == (96, 72)
+    complete_photo(out, photo()[:6000])
 
 
 def test_jpeg_missing_huffman_tables(tmp_path):
