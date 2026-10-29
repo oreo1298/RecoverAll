@@ -93,6 +93,132 @@ format whose length can't be told ends where the next file starts, with at most 
 found this way have no names, so photos are named from their EXIF data (date and camera) where they can
 be, and the others from where they were found.
 
+## Videos (`core/media/`, `core/carve/video.py`)
+
+**Checking a found video against its index.** An MP4 or MOV file is boxes: the movie box (`moov`) is the
+index, whose sample tables say how big every frame is, where it lies and when it is shown. The frames are in
+the media data box (`mdat`), which has no structure of its own, but the frames do: an H.264 or H.265 frame
+is a run of NAL units, each led by its length and a header whose bits must make sense, and the lengths add
+up exactly to the frame's size. Inside a NAL unit the bytes `00 00 00`, `00 00 01` and `00 00 02` never
+occur. A ProRes frame starts with its size and `icpf`; a Motion JPEG frame is a JPEG. So the signature
+search looks at nine frames where the index puts them (`media/mp4carve.py`). When they fit, the video is in
+one piece, which costs a few small reads.
+
+**Fragmented videos.** When the first frames fit and a later one doesn't, the video went on somewhere else.
+The bytes that frame must begin with are known (its first NAL length, or what the frames checked so far
+began with), so they are searched for further on, at the same position within a disk block, and the frames
+found there must fit too. The cut between the two pieces lies between the last byte seen to fit and the
+first that didn't, on a block boundary. Every candidate is scored by how well the bytes around it fit (NAL
+units that chain, no forbidden bytes inside them, sound that looks like sound, the start of another file
+just after the cut), and the best one is taken. This repeats for every piece, up to 64. A movie box found
+apart from its media data, ahead of it or behind it, belongs to it when the first frames fit where it says.
+
+**Unfinished recordings.** A camera writes the frames while it records and the index only when it stops.
+Media data without any movie box, whose content is valid video, is walked from its first byte: NAL units as
+long as their lengths chain, then the sound between two video chunks is skipped when the next valid frame
+starts within a bounded distance. The recording ends where the last frame stops being valid, short of blank
+space or another file. It is listed under *Unfinished recordings* with a poor chance, marked `needs_index`.
+
+**Rebuilding the index** (`media/mp4repair.py`). With a reference video (a good recording from the same
+camera with the same settings), the tracks, the codec configuration, the frame and sound timing and the way
+the camera interleaves picture and sound are learned from the reference's index. Then the media data is
+walked from its start and cut into frames, each by its own structure:
+
+| Stream | How a frame's end is found |
+|---|---|
+| H.264, H.265 (`media/h264.py`, `media/hevc.py`) | NAL unit lengths; slice headers say where a new picture starts, whether it is a key frame and its picture order count, which gives B-frames their composition offsets |
+| MPEG-4 Part 2, H.263 | start codes |
+| Motion JPEG | JPEG markers |
+| ProRes | the frame header |
+| AAC (`media/aac.py`) | raw AAC has no header and no length: each frame is parsed to its end (section data, scale factors, spectral data with the Huffman codebooks) |
+| AMR, AC-3, E-AC-3, MP3 (`media/audioframes.py`) | the frame header gives the length |
+| PCM | the reference's chunk sizes |
+| timecode, GoPro GPMF | the reference's sample sizes |
+
+At every position the track the reference's interleaving makes likeliest is tried first, then the others.
+A damaged stretch is skipped: the walk carries on at the next frame that parses, and the pictures up to the
+next key frame are dropped, because they can't be decoded. Without a reference, a stream that repeats its
+parameter sets (SPS/PPS) still gets its picture back. The repaired file is written as pieces: ranges of the
+damaged file and new bytes. The media data is never read into memory as a whole, so recordings of many
+gigabytes are fine. A 720p phone clip of a few seconds is rebuilt in about a tenth of a second, with frames
+identical to the original's.
+
+**The other containers** are walked element by element, and a new copy keeps what parses:
+
+| Container | Repaired |
+|---|---|
+| Matroska, WebM (`media/mkv.py`, `media/ebml.py`) | the last Cluster cut at its last complete block; damage dropped and the walk resumed at the next block or Cluster that parses; Cues, SeekHead, duration and CRC-32s rebuilt; a lost start from the reference's EBML header and Tracks |
+| MPEG-TS, MTS, M2TS (`media/mpegts.py`) | 188-, 192- and 204-byte packets; junk and broken packets dropped; PAT and PMT put in front when the start was lost |
+| MPG, VOB, MOD (`media/mpegps.py`) | resync at the next valid pack; the video resumed at an I picture with a sequence header in front; the program end code added |
+| WMV, WMA, ASF (`media/asf.py`) | damaged packets dropped; sizes, counts, durations and the index rebuilt; a lost Header Object from the reference |
+| FLV (`media/flv.py`) | cut at the last complete tag; resync where a tag header and the size after it agree; onMetaData corrected in place |
+| AVI | RIFF and movi sizes set to what is there, the index (idx1) rebuilt |
+
+**Previews** (`core/videopreview.py`): the details (length, picture size, frame rate, codecs) come from the
+movie box wherever it lies, or an AVI's main header. The picture is the first key frame. A Motion JPEG frame
+is shown as it is. An H.264 or H.265 frame is turned into a tiny raw stream (the parameter sets from the
+codec configuration, then the frame with start codes instead of lengths) and decoded by ffmpeg, which works
+however big the file is. Other containers start with what a decoder needs, so their first megabytes go to
+ffmpeg. The data comes from a disk being recovered, which makes it untrusted: ffmpeg reads it from a pipe,
+never runs as root (it gets the desktop user's ids, or nobody's), has no supplementary groups, a minimal
+environment and limits on memory, CPU time and open files.
+
+## Photos (`core/media/jpegdec.py`, `core/carve/images.py`)
+
+**Decoding JPEG data to check it.** A JPEG's picture data is Huffman codes for 8×8 blocks, grouped into
+MCUs. `jpegdec` decodes them far enough to validate them, without making pixels: random or foreign data
+soon gives a code that isn't in the tables, more than 63 coefficients in a block, a DC value no block can
+have, or a restart marker out of turn. So it says exactly where the data stops being valid and how much of
+the photo decoded, for baseline and progressive photos. Codes are looked up 16 bits at a time in tables
+that also hold the value bits, which makes it fast enough in pure Python.
+
+**Fragmented photos.** A photo whose clusters aren't one after the other breaks off where its first piece
+ends: what follows is another file's data. The piece ends at a cluster boundary at or a little before the
+point where decoding failed. The decoder's state there (bit position, DC predictors, restart counter, EOB
+run) is a checkpoint. Clusters further on (up to 32 MiB) are decoded from that checkpoint, and the photo
+goes on in one that decodes validly. Of those, the ones whose blocks best continue the DC values of the row
+above come first; if the photo then doesn't decode to its end, the next one is tried. This repeats for each
+break, up to four pieces.
+
+**Repairing photos** (`core/filerepair.py`). The decoder also finds the damage in a recovered photo:
+
+- **Cut short or overwritten**: everything up to the last good MCU is kept, and the missing MCUs are coded
+  as grey with the photo's own Huffman tables, continuing from the last DC values. With restart markers,
+  the interval the damage is in is finished in grey and the ones after it are grey intervals with their
+  markers. The photo keeps its size, every
+  program opens it, and the repair says how much is missing.
+- **Damaged in the middle**, with restart markers: only the damaged intervals are replaced by grey ones,
+  and the rest of the photo shows in its place.
+- **Progressive photos** are ended after their last complete pass.
+- **A damaged header or damaged tables** are rebuilt from the intact tables just before the picture data,
+  or from a reference photo of the same camera and size. MJPEG frames without Huffman tables get the
+  standard ones.
+
+**RAW previews** (`media/rawpreview.py`). A damaged RAW file usually can't be developed, but the full-size
+JPEG the camera stored with it often survives. Previews are found through the TIFF IFDs and sub-IFDs (CR2,
+NEF, ARW, ORF, RW2, PEF, DNG, SRW and others), the CR3 boxes, the RAF header, EXIF thumbnails and MPF
+pictures, and by searching the file for JPEG start markers when the structures are damaged. The largest one
+that decodes completely is saved as *name (preview).jpg*.
+
+**Thumbnail caches** (`media/thumbcache.py`). At the end of a scan, files that are thumbnail caches are
+read: Windows `thumbcache_*.db` (Vista to 11) and `Thumbs.db` (XP, with the original names and dates from
+its Catalog), Android `.thumbdata`, freedesktop PNG thumbnails (whose `Thumb::URI` gives the original's full
+path) and macOS QuickLook (`index.sqlite` with `thumbnails.data`, raw pixels saved as PNG). Their pictures
+become a volume of their own, *Thumbnails of deleted photos*, one folder per cache, flagged `F_THUMBNAIL`.
+
+## Repairing damaged files (`core/filerepair.py`)
+
+`analyze()` reads a file and makes a plan: the problems found, what each repair does, and the repaired file
+as pieces (ranges of the damaged file and new bytes). `repair()` writes the pieces to a new file; the damaged
+one is never changed. Photos, videos, PNG, GIF, the ZIP family (DOCX, XLSX, ODT, EPUB, APK), PDF, RIFF and
+AIFF files, MP3 and gzip/bz2/xz are covered. Formats that need a good file from the same camera (videos
+without their index or their start, JPEGs without their header) say so, and are repaired when one is given.
+
+**Repair after recovery** (`Recovery.repair_pass`, on by default in the app and in `recoverctl photos`):
+recovered files that may be damaged (found by signature, deleted with less than a good chance, or with
+unreadable parts) and whose type the repair knows are checked. Each damaged one gets a repaired copy,
+*name (repaired).ext*, next to it. The report lists every copy, and every file that needs a reference.
+
 ## Lost partitions (`core/partsearch.py`, `core/partitions.py`)
 
 **Quick Search** probes where partitions usually start: every 1 MiB, the 63-sector and cylinder
