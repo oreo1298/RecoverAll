@@ -86,8 +86,8 @@ class RepairPage(OperationPage):
         lay.addWidget(c2)
 
         c3 = Card("Repair damaged files", "file")
-        c3.add(hint("Videos that won't play — recordings the camera or phone never finished (MP4, MOV), cut-short "
-                    "or damaged MKV, MTS/M2TS, MPG, WMV, FLV and AVI files —, photos that open grey or half, camera "
+        c3.add(hint("Videos that won't play (recordings the camera or phone never finished, cut-short or damaged "
+                    "MP4, MOV, MKV, MTS/M2TS, MPG, WMV, FLV and AVI files), photos that open grey or half, camera "
                     "RAW files whose preview can still be saved, Office documents and archives that “are corrupt”, "
                     "PDFs that won't open. The originals are never changed: repaired copies are written next to "
                     "them (or into the folder below). Drop files here or add them.", faint=False))
