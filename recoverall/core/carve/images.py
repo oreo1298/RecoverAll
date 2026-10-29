@@ -7,7 +7,11 @@ and measures the file exactly where the format allows it:
 * JPEG: the segments are walked one by one and the compressed data is scanned for the next marker, through
   every scan of a progressive picture, up to the end-of-image marker. A JPEG cut short keeps what was found
   (poor chance). An MPO (3D or multi-frame) file, and a JPEG that carries a preview image after its own end,
-  is kept whole when its MP extension (APP2 "MPF") lists the other pictures.
+  is kept whole when its MP extension (APP2 "MPF") lists the other pictures. A photo whose data breaks off
+  (another file's data, zeros, text, restart markers out of turn) is decoded (media/jpegdec.py) to find the
+  cluster where it stops and the clusters further on where it goes on: a fragmented photo comes back as its
+  pieces (fair chance; see "JPEG fragments" below). A run of zeros that is a dark area of the photo itself
+  (optimised Huffman tables code flat blocks as zero bits) is decoded through instead of ending it.
 * PNG, GIF, PSD, WebP, BMP: chunk/block/section walks or recorded sizes.
 * TIFF and the RAW files built on it (CR2, NEF/NRW, ARW/SR2/SRF, DNG, ORF, RW2, PEF, SRW and other makers'):
   the end of the last IFD, value or image strip/tile. Panasonic RW2 doesn't record the length of its sensor
@@ -53,20 +57,48 @@ _STANDALONE = frozenset(range(0xD0, 0xD8)) | {0x01}
 _FIRST_MARKERS = frozenset(range(0xE0, 0xF0)) | _SOF | {0xC4, 0xDB, 0xDD, 0xFE}
 _SCAN_STEP = 1024 * 1024
 _BLANK_RUNS = (bytes(4096), b"\xff" * 4096)
+_ZEROS512 = bytes(512)
+_MARKER_OR_RST = re.compile(rb"\xff[^\x00\xff]")
+_HIGH = bytes(range(128, 256))
 JPEG_MAX = 512 * MiB
 
 
-def _next_marker(r, pos: int, stop: int = JPEG_MAX) -> int:
+def _next_marker(r, pos: int, stop: int = JPEG_MAX, seen: dict | None = None, blanks: bool = True) -> int:
     """Offset of the first marker (0xFF not followed by 0x00, a restart marker or a fill byte) at or after
     POS: where the entropy-coded data of a scan ends. A run of 4 KiB of zeros or 0xFF (compressed data
     never has one: the rest of the picture was wiped, or the flash memory erased) or the end of the medium
-    before STOP give -1 - (where the data ends)."""
+    before STOP give -1 - (where the data ends). With SEEN (a walk's state), the restart markers passed are
+    noted (SEEN["rst"] offsets, SEEN["rstn"] their numbers), and SEEN["text"] is set when a whole 4 KiB
+    cluster of the data (relative to the photo's start) is text, or 512 bytes of it are zeros. BLANKS False:
+    runs of zeros are data too (a flat dark area coded with optimised Huffman tables is all zero bits)."""
     stop = min(stop, r.limit)
     while pos < stop:
         data = r.read(pos, _SCAN_STEP + 1)
-        m = _MARKER.search(data)
+        if seen is None:
+            m = _MARKER.search(data)
+        else:
+            rst, rstn = seen["rst"], seen["rstn"]
+            m = None
+            for m in _MARKER_OR_RST.finditer(data):
+                k = data[m.start() + 1]
+                if not 0xD0 <= k <= 0xD7:
+                    break
+                if len(rst) < 1 << 20:
+                    rst.append(pos + m.start())
+                    rstn.append(k)
+            else:
+                m = None
         hi = m.start() if m else len(data)
-        z = min((i for i in (data.find(run, 0, hi + 4096) for run in _BLANK_RUNS) if 0 <= i <= hi), default=-1)
+        z = min((i for i in (data.find(run, 0, hi + 4096) for run in _BLANK_RUNS) if 0 <= i <= hi), default=-1) \
+            if blanks else -1
+        if seen is not None and not seen["text"]:
+            top = min(hi, z if z >= 0 else hi)
+            if data.find(_ZEROS512, 0, top) >= 0:
+                seen["text"] = True                 # 512 zero bytes: no photo's data has them
+            for i in range((-pos) % 4096, top - 4095, 4096):
+                if seen["text"] or data.find(b"\xff", i, i + 4096) < 0 and _texty(data[i:i + 4096]):
+                    seen["text"] = True
+                    break
         if z >= 0:
             return -1 - (pos + z)
         if m:
@@ -75,6 +107,12 @@ def _next_marker(r, pos: int, stop: int = JPEG_MAX) -> int:
             return -1 - (pos + len(data))
         pos += _SCAN_STEP
     return -1 - stop
+
+
+def _texty(blk: bytes) -> bool:
+    """Text (ASCII, UTF-8, UTF-16): no 0xFF byte and nearly all bytes below 128. A JPEG's data has a 0xFF
+    every 256 bytes or so, and half its bytes are 128 or more."""
+    return b"\xff" not in blk and len(blk.translate(None, _HIGH)) * 8 >= len(blk) * 7
 
 
 def _dht_ok(d: bytes) -> bool:
@@ -97,13 +135,17 @@ def _dqt_ok(d: bytes) -> bool:
 
 def walk_jpeg(r, base: int = 0, meta: bool = True, entropy: bool = True) -> dict | None:
     """Walk the JPEG starting at BASE: {"end", "complete" (EOI reached), "sof" (width, height), "scans",
-    "progressive", "exif" (TiffInfo), "mpf" (offset of its TIFF header, bytes)}. With ENTROPY False it stops
-    at the first scan (enough for the EXIF block). None if it doesn't start like a JPEG."""
+    "progressive", "exif" (TiffInfo), "mpf" (offset of its TIFF header, bytes), "ranges" (where each scan's
+    compressed data is), "dri" (the restart interval), "mcus", "blank" (it stops at a run of zeros or 0xFF);
+    with META and FRAGMENTS, "rst"/"rstn"/"rst_scans" (the restart markers passed) and "text" (a 4 KiB
+    cluster of text inside)}. With ENTROPY False it stops at the first scan (enough for the EXIF block).
+    None if it doesn't start like a JPEG."""
     h = r.read(base, 4)
     if len(h) < 4 or h[:3] != b"\xff\xd8\xff" or h[3] not in _FIRST_MARKERS:
         return None
     st: dict = {"end": None, "complete": False, "sof": None, "scans": 0, "progressive": False, "exif": None,
-                "mpf": None, "corrupt": False}
+                "mpf": None, "corrupt": False, "ranges": [], "dri": 0, "mcus": 0, "blank": False, "rst": [],
+                "rstn": bytearray(), "rst_scans": [], "text": False}
     pos = base + 2
     for _ in range(200000):
         m = r.read(pos, 4)
@@ -138,10 +180,15 @@ def walk_jpeg(r, base: int = 0, meta: bool = True, entropy: bool = True) -> dict
             if not entropy:
                 st["end"] = pos
                 return st
-            nxt = _next_marker(r, pos + 2 + seglen, base + JPEG_MAX)
+            data = pos + 2 + seglen
+            st["rst_scans"].append(len(st["rst"]))
+            nxt = _next_marker(r, data, base + JPEG_MAX, st if meta and FRAGMENTS else None)
             if nxt < 0:                             # cut short: keep what is there
                 pos = -1 - nxt
+                st["ranges"].append((data, pos))
+                st["blank"] = pos < r.limit
                 break
+            st["ranges"].append((data, nxt))
             pos = nxt
             continue
         if mk in _SOF:
@@ -155,6 +202,13 @@ def walk_jpeg(r, base: int = 0, meta: bool = True, entropy: bool = True) -> dict
             if st["sof"] is None:
                 st["sof"] = (x, y)
                 st["progressive"] = mk in _PROGRESSIVE
+                hv = r.read(pos + 11, 3 * nf)
+                if len(hv) == 3 * nf:
+                    hs = [hv[3 * i] >> 4 for i in range(nf)]
+                    vs = [hv[3 * i] & 15 for i in range(nf)]
+                    if all(hs) and all(vs):
+                        st["mcus"] = -(-x // (8 * max(hs))) * -(-y // (8 * max(vs))) if nf > 1 else \
+                            -(-x // 8) * -(-y // 8)
         elif mk == 0xC4:
             if not _dht_ok(r.read(pos + 4, seglen - 2)):
                 st["corrupt"] = True
@@ -163,9 +217,12 @@ def walk_jpeg(r, base: int = 0, meta: bool = True, entropy: bool = True) -> dict
             if not _dqt_ok(r.read(pos + 4, seglen - 2)):
                 st["corrupt"] = True
                 break
-        elif mk == 0xDD and seglen != 4:
-            st["corrupt"] = True
-            break
+        elif mk == 0xDD:
+            if seglen != 4:
+                st["corrupt"] = True
+                break
+            d = r.read(pos + 4, 2)
+            st["dri"] = (d[0] << 8 | d[1]) if len(d) == 2 else 0
         elif mk == 0xE1 and meta and st["exif"] is None and seglen > 14:
             d = r.read(pos + 4, seglen - 2)
             if d[:6] == b"Exif\0\0":
@@ -233,8 +290,335 @@ def parse_jpg(r: Reader) -> Hit | None:
         info["progressive"] = True
     if images > 1:
         info["images"] = images
+    if FRAGMENTS and images == 1 and _broken(r, st):
+        runs = reassemble_jpeg(r, st)
+        if runs and len(runs) == 1:              # whole after all (it only looked broken: zeros of a dark area)
+            return Hit("jpg", runs[0][1], CHANCE_GOOD, name=name, mtime=mtime, info=info)
+        if runs:
+            info["fragments"] = len(runs)
+            return Hit("jpg", sum(n for _o, n in runs), CHANCE_FAIR, name=name, mtime=mtime, info=info, runs=runs)
     return Hit(ext, end, chance, name=name, mtime=mtime, info=info,
                description="MPO image (3D / multi-picture)" if ext == "mpo" else None)
+
+
+# ---------------------------------------------------------------------- JPEG fragments
+# A photo whose clusters aren't one after the other on the disk breaks off where its first fragment ends:
+# what follows is another file's data (random-looking, text, zeros, another photo's). The entropy decoder
+# (media/jpegdec.py) finds where the picture data stops being valid. The fragment ends at a cluster boundary
+# at or a little before that point (wrong data can decode for a while), and the photo goes on in the
+# cluster further on from which decoding continues validly from exactly the decoder's state at the break:
+# its bit position, DC predictors, restart counter and EOB run. Of the clusters that do, the ones whose MCUs
+# best continue the DC values of the row above come first (the median distance: edges in the picture give
+# the right one a few large distances too); when the photo then doesn't decode to its end, the next one is
+# tried. The search is repeated for each break, up to FRAGMENT_MAX pieces.
+FRAGMENTS = True                 # put fragmented photos back together (the scan may turn it off)
+FRAGMENTS_THOROUGH = False       # also decode photos that look whole: finds another photo's clusters inside
+#                                  one, which nothing else shows (slow: about a second per megabyte)
+FRAGMENT_WINDOW = 32 * MiB       # how far after a break the rest of the photo is looked for
+FRAGMENT_MAX = 4                 # pieces at most
+_FRAG_DECODE_MAX = 64 * MiB      # longer photos aren't decoded
+_FRAG_CLUSTERS = ((4096, 3, None), (512, 8, 4 * MiB))   # (cluster size, breaks tried, window: None FRAGMENT_WINDOW)
+_FRAG_LONG = 64 * KiB            # how much of the likeliest candidates is decoded to compare them
+_FRAG_FAR = 64 * KiB             # a continuation that decodes this far is taken to be the right cluster size
+_BAD_TAIL = re.compile(rb"\xff[\x01-\xbf\xc0-\xc3\xc5-\xcf\xd8]")      # never in a photo's data or its tail
+_RST_MARKS = re.compile(rb"\xff[\xd0-\xd7]")
+_OTHER_MAGIC = (b"\x89PNG", b"PK\x03\x04", b"%PDF", b"GIF8", b"RIFF", b"II*\x00", b"MM\x00*", b"ID3",
+                b"OggS", b"fLaC", b"\x1aE\xdf\xa3", b"\xff\xd8\xff", b"8BPS", b"Rar!", b"7z\xbc\xaf")
+_Z64, _F64 = bytes(64), b"\xff" * 64
+
+
+def _broken(r, st: dict) -> bool:
+    """Cheap signs that a photo's data isn't all its own: it breaks off before its end (not at the end of
+    the medium), its restart markers are out of turn or too few or too many, a restart interval is much
+    longer than its neighbours and doesn't decode on its own, or a whole 4 KiB of it is text. With
+    FRAGMENTS_THOROUGH every photo is decoded."""
+    if not st["complete"]:
+        return st["end"] < r.limit - 2 and bool(st["ranges"])
+    if FRAGMENTS_THOROUGH or st["text"]:
+        return True
+    dri, rst, rstn = st["dri"], st["rst"], st["rstn"]
+    if rst and not dri:
+        return True                                  # restart markers in a photo that has none
+    bounds = st["rst_scans"] + [len(rst)]
+    for k in range(len(st["rst_scans"])):
+        for j, i in enumerate(range(bounds[k], bounds[k + 1])):
+            if rstn[i] != 0xD0 + j % 8:
+                return True
+    if dri and len(st["ranges"]) == 1 and not st["progressive"] and st["mcus"]:
+        if len(rst) != -(-st["mcus"] // dri) - 1:
+            return True
+        return _spiky(r, st, rst, dri)
+    return False
+
+
+def _spiky(r, st: dict, marks: list[int], dri: int) -> bool:
+    """A restart interval much longer than both its neighbours (another file's cluster inside it) that
+    doesn't decode on its own."""
+    from ..media import jpegdec
+    a, b = st["ranges"][0]
+    starts = [a] + [m + 2 for m in marks]
+    ends = marks + [b]
+    lens = [e - s for s, e in zip(starts, ends)]
+    spikes = []
+    for j in range(len(lens)):
+        nb = max(lens[j - 1] if j else 0, lens[j + 1] if j + 1 < len(lens) else 0)
+        if lens[j] - nb >= 3500 and lens[j] * 4 > nb * 5:
+            spikes.append((lens[j] - nb, j))
+    if not spikes:
+        return False
+    header = r.read(0, a)
+    for _gain, j in sorted(spikes, reverse=True)[:3]:
+        body = r.read(starts[j], lens[j])
+        res = jpegdec.decode_check(body + b"\xff\xd9", 0, None, header=header)   # as if it were the first
+        if res.mcus_decoded < min(dri, st["mcus"] - j * dri) or res.error_offset != len(body):
+            return True
+    return False
+
+
+def _tail_end(r, pos: int, blanks: bool = True) -> int:
+    """Where a photo's data that goes on at POS ends: after its end-of-image marker, at a break, or where
+    the medium ends (BLANKS False: runs of zeros don't end it)."""
+    for _ in range(4096):
+        nxt = _next_marker(r, pos, blanks=blanks)
+        if nxt < 0:
+            return -1 - nxt
+        m = r.read(nxt, 4)
+        if len(m) < 4 or m[1] == 0xD9:
+            return nxt + 2
+        if m[1] not in (0xC4, 0xDA, 0xDB, 0xDD, 0xFE) and not 0xE0 <= m[1] <= 0xEF:
+            return nxt
+        pos = nxt + 2 + ((m[2] << 8) | m[3])
+    return pos
+
+
+def _foreign(stream: bytes, lo: int, hi: int, align: int) -> int:
+    """The first 512-byte block (at ALIGN + k·512) in [LO, HI) that can't be picture data: zeros, 0xFF
+    bytes or text; HI if none."""
+    start = lo + (align - lo) % 512
+    for i in range(start, hi, 512):
+        blk = stream[i:i + 512]
+        if len(blk) < 512:
+            break
+        if blk[:64] == _Z64 or blk[:64] == _F64 or _texty(blk):
+            return i
+    return hi
+
+
+def _candidates(r, lo: int, hi: int, cs: int) -> list[int]:
+    """Clusters (offsets, multiples of CS) in [LO, HI) that could be the rest of a photo: not empty, not
+    text, not the start of another file, no marker that can't be in a photo's data in the first 512 bytes."""
+    out: list[int] = []
+    pos = lo
+    step = 4 * MiB
+    while pos < hi:
+        n = min(step, hi - pos)
+        chunk = r.read(pos, n + 512)
+        if not chunk:
+            break
+        bad = {m.start() // cs for m in _BAD_TAIL.finditer(chunk) if m.start() % cs < 510}
+        for i in range(0, min(n, len(chunk)), cs):
+            if i // cs in bad:
+                continue
+            head = chunk[i:i + 64]
+            if head == _Z64 or head == _F64 or head.startswith(_OTHER_MAGIC) or head[4:8] == b"ftyp" or \
+                    _texty(chunk[i:i + 512]):
+                continue
+            out.append(pos + i)
+        pos += n
+    return out
+
+
+def _dc_cost(res, cp, probe) -> tuple[float, float]:
+    """How badly the DC values of the MCUs decoded from a candidate break with the picture: the median and
+    the trimmed mean of every component's distance from the MCU above (decoded before the break) and of the
+    first MCU's from the one before it. Medians, because real edges in the picture give large distances
+    for the right candidate too, but only here and there. Too few MCUs to tell: the worst."""
+    sc = res._dec.scans[cp.scan]
+    if not sc.rec_d or not probe.dcs:
+        return (0.0, 0.0) if not sc.rec_d else (1e9, 1e9)
+    comps = sc.info.comps
+    f = res.frame
+    across = f.mcux if len(comps) > 1 else f.comps[comps[0]].bw
+    have = min(min(len(sc.rec_d[c]) for c in comps), cp.mcu + 1)
+    dcs = probe.dcs
+    diffs = []
+    if 0 < cp.mcu < have:
+        diffs.append(sum(abs(dcs[0][c] - sc.rec_d[c][cp.mcu]) for c in comps))
+    for t, v in enumerate(dcs):
+        above = cp.mcu + t - across
+        if above < 0:
+            continue
+        if above + 1 >= have:
+            break
+        diffs.append(sum(abs(v[c] - sc.rec_d[c][above + 1]) for c in comps))
+    if len(diffs) < min(8, max(1, cp.mcu - across + 1)):
+        return 1e9, 1e9
+    diffs.sort()
+    keep = diffs[:max(1, len(diffs) * 3 // 5)]
+    return float(diffs[len(diffs) // 2]), sum(keep) / len(keep)
+
+
+def _continuations(r, res, stream: bytes, cur: int, fcur: int, budget: list[int], clusters: tuple) -> list:
+    """Where the photo may go on after the break, the likeliest first: [(stream offset of the break X, file
+    offset Y, checkpoint, how badly it continues the picture)]. The current fragment starts at stream offset
+    CUR = file offset FCUR. Every cluster boundary a little before the error is a possible break; the
+    clusters further on are tried from each one's decoder state: first a little of their data, then more of
+    the ones that go on validly, and those whose first MCUs best continue the picture come first."""
+    from ..media import jpegdec
+    err_at = res.error_offset if res.error_offset is not None else len(stream)
+    sc = res.scans[-1] if res.scans else None
+    if sc is None:
+        return []
+    lo = max(cur, sc.data)
+    limit = _foreign(stream, lo, min(err_at + 512, len(stream)), (fcur - cur) % 512)
+    limit = min(limit, err_at)
+    row = res.frame.mcux if len(sc.comps) > 1 else res.frame.comps[sc.comps[0]].bw
+    for cs, tries, window in clusters:
+        window = FRAGMENT_WINDOW if window is None else min(window, FRAGMENT_WINDOW)
+        shift = (fcur - cur) % cs            # stream offset X is a cluster boundary when (X + shift) % cs == 0
+        top = (limit + shift) // cs * cs - shift
+        xs = [x for x in range(top, max(lo, top - tries * cs) - 1, -cs) if x > lo]
+        if not xs:
+            continue
+        per_mcu = max(1, (xs[0] - sc.data) // max(1, sc.decoded))            # bytes per MCU so far
+        want = min(4 * MiB, max(_FRAG_LONG, int(per_mcu * row * 1.3)))
+        first_y = fcur + (xs[-1] - cur) + cs
+        ys = _candidates(r, first_y, min(r.limit, fcur + (xs[0] - cur) + window), cs)
+        finalists = []
+        ri = res.restart_interval
+        for x in xs:
+            cp = res.checkpoint(x)
+            if cp is None:
+                continue
+            fx = fcur + (x - cur)
+            head = stream[cp.offset:x]
+            bits_head = len(head) * 8 - cp.bit
+            # with restart markers, the next one after the break ends the interval being decoded there
+            want_rst = 0xD0 + (cp.mcu // ri + len(_RST_MARKS.findall(head))) % 8 if ri else 0
+            for y in ys:
+                if y <= fx:
+                    continue
+                if budget[0] <= 0:
+                    return []
+                if ri:
+                    m = _RST_MARKS.search(r.read(y, _FRAG_LONG))
+                    if m is not None and m.group()[1] != want_rst:
+                        continue                          # another interval's data: not where the photo goes on
+                budget[0] -= 1
+                p1 = res.probe(cp, head + r.read(y, 384), 8, bits_head + 384 * 8)
+                if p1.error not in ("", jpegdec.ERR_CUT) and not p1.scan_done:
+                    continue
+                budget[0] -= 4
+                data = head + r.read(y, max(cs, 4096))
+                p2 = res.probe(cp, data, 64, len(data) * 8)
+                into = p2.end_bit // 8 - len(head)
+                whole = p2.error in ("", jpegdec.ERR_CUT) or p2.scan_done
+                if whole or into >= 2048:
+                    finalists.append((-(4096 if whole else into), _dc_cost(res, cp, p2), y, x, cp))
+        if not finalists:
+            continue
+        # the likeliest decoded further (more than an MCU row): those that continue the picture best first
+        finalists.sort(key=lambda f: f[:3])
+        ranked = []
+        for neg_into, _cost, y, x, cp in finalists[:32]:
+            budget[0] -= 32
+            data = stream[cp.offset:x] + r.read(y, want)
+            p3 = res.probe(cp, data, min(row * 2 + 16, 8192), len(data) * 8)
+            ranked.append((neg_into, _dc_cost(res, cp, p3), y, x, cp))
+        ranked.sort(key=lambda f: f[:4])
+        return [(x, y, cp, (into, cost)) for into, cost, y, x, cp in ranked[:3]]
+    return []
+
+
+def reassemble_jpeg(r, st: dict | None = None) -> list[tuple[int, int]] | None:
+    """The pieces of a fragmented JPEG starting at offset 0 of R, as [(offset, length)] in order (the first
+    at 0), or None when it isn't fragmented or the rest wasn't found."""
+    from ..media import jpegdec
+    st = st or walk_jpeg(r)
+    if st is None or not st["ranges"]:
+        return None
+    end = min(st["end"] + 4096, r.limit)
+    if end > _FRAG_DECODE_MAX:
+        return None
+    stream = r.read(0, end)
+    res = jpegdec.decode_check(stream)
+    if st["blank"] and res.supported and res.scans and res.error == jpegdec.ERR_CUT:
+        # the walk stopped at a run of zeros: perhaps a dark area of the photo itself, which decodes on
+        whole = _tail_end(r, st["ranges"][-1][0], blanks=False)
+        if st["end"] < whole <= _FRAG_DECODE_MAX:
+            cp = res.checkpoint(res.error_offset)
+            if cp is not None:
+                longer = r.read(0, whole)
+                res = res.resume(cp, longer, cp.offset)
+                if res.ok:
+                    return [(0, res.eoi_offset + 2)]
+                stream = longer
+    if res.ok or not res.supported or not res.scans or res.error == jpegdec.ERR_HEADER:
+        return None
+    work = {"probes": 200_000, "bytes": 4 * end + 8 * MiB, "tries": 12}   # what a photo may cost
+    return _assemble(r, res, stream, [(0, 0)], work, _FRAG_CLUSTERS)
+
+
+def _assemble(r, res, stream: bytes, pieces: list[tuple[int, int]], work: dict, sizes: tuple
+              ) -> list[tuple[int, int]] | None:
+    """Carry on from where decoding broke off. Every likely continuation is tried and decoded as far as it
+    goes (one that reaches the end of the photo with MCUs missing is wrong); then the search goes on from the
+    one that best continues the picture (from the next one when it leads nowhere). The 512-byte clusters of
+    SIZES are tried only when no 4 KiB one went far — a disk has one cluster size, so the later breaks are
+    looked for with the size that worked. PIECES: (stream offset, file offset) where each piece found so far
+    starts."""
+    from ..media import jpegdec
+    if len(pieces) >= FRAGMENT_MAX:
+        return None
+    cur, fcur = pieces[-1]
+    # trying a continuation changes what was decoded after its own checkpoint: going back to the earliest
+    # checkpoint tried and decoding the data again restores the decoder to the break
+    back = None
+    tried: list[tuple] = []
+    dirty = False
+
+    def again():
+        return res.resume(back, stream, back.offset) if dirty else res
+
+    for clusters in sizes:
+        res = again()
+        dirty = False
+        budget = [work["probes"]]
+        cands = _continuations(r, res, stream, cur, fcur, budget, (clusters,))
+        work["probes"] = budget[0]
+        for x, y, cp, score in cands:
+            if any(t[2] == x and t[3] == y for t in tried):
+                continue
+            tail = _tail_end(r, y)
+            if tail <= y or x + (tail - y) > _FRAG_DECODE_MAX or min(work.values()) <= 0:
+                continue
+            work["bytes"] -= tail - y
+            work["tries"] -= 1
+            nxt = stream[:x] + r.read(y, tail - y)
+            if back is None or (cp.scan, cp.mcu) < (back.scan, back.mcu):
+                back = cp
+            res = again().resume(cp, nxt, cp.offset)
+            dirty = True
+            got = pieces + [(x, y)]
+            if res.ok:
+                stop = res.eoi_offset + 2
+                return [(f, (got[i + 1][0] if i + 1 < len(got) else stop) - s) for i, (s, f) in enumerate(got)]
+            # the end of the photo reached with MCUs missing: the data went on elsewhere, not here
+            if res.supported and res.error != jpegdec.ERR_HEADER and res.eoi_offset is None:
+                reach = (res.error_offset if res.error_offset is not None else len(nxt)) - x
+                tried.append((score, reach, x, y, cp, nxt, clusters))
+        if any(t[1] >= _FRAG_FAR for t in tried):
+            break
+    tried.sort(key=lambda t: (t[0], -t[1]))
+    for _score, _reach, x, y, cp, nxt, clusters in tried[:3]:
+        if min(work.values()) <= 0:
+            return None
+        res = again().resume(cp, nxt, cp.offset)
+        dirty = True
+        done = _assemble(r, res, nxt, pieces + [(x, y)], work, (clusters,))
+        if done:
+            return done
+    return None
 
 
 # ---------------------------------------------------------------------- PNG

@@ -6,9 +6,15 @@ damaged in a few typical ways, and most of them can be put right because the for
 =============  ===================================================================================================
 JPEG           other data before the start marker (cut); data after the end marker (cut; a camera's second
                image or a motion-photo video after it is kept); no end marker (added: the readable part shows,
-               the rest is gray); a damaged header (rebuilt from the intact tables just before the image data,
+               the rest is grey, and how much is missing is said); picture data damaged inside, found exactly
+               by decoding it (media/jpegdec.py): with restart markers the damaged intervals are replaced by
+               grey ones coded with the photo's own tables and the rest shows in its place, without them the
+               photo is kept up to the last good MCU and the rest filled with grey; a progressive photo is
+               ended after its last complete pass; other data between the header's segments (cut out); a
+               damaged header or damaged tables (rebuilt from the intact tables just before the image data,
                or taken from a REFERENCE photo of the same camera and size); no Huffman tables (MJPEG frames
-               from AVI files: the standard tables of JPEG Annex K are inserted).
+               from AVI files: the standard tables of JPEG Annex K are inserted); nothing of the photo left
+               (its embedded preview — EXIF thumbnail or MPF picture — is saved instead).
 PNG            wrong checksums (recomputed), data after IEND (cut), a damaged signature (rewritten), cut-short or
                damaged image data: the readable rows are kept, the rest is black, all in one new IDAT.
 GIF            cut short (the frame that is there is closed and the trailer added), data after the trailer.
@@ -389,7 +395,8 @@ def _jpeg_scan(buf, pos: int, end: int) -> tuple[int, bool, str]:
             if 2 <= length and at + 2 + length <= end and (marker != 0xDA or _sos_ok(buf, at, end)):
                 pos = at + 2 + length
                 continue
-        return at, False, "file" if marker == 0xD8 or 0xE0 <= marker <= 0xEF else "damaged"
+        # another file starts with a start marker; an APPn marker on its own is damage (or random data)
+        return at, False, "file" if marker == 0xD8 else "damaged"
     return end, False, "cut"
 
 
@@ -405,12 +412,13 @@ def _strip_zeros(buf, start: int, end: int, keep: int = 64) -> int:
     return z if end - z > keep else end
 
 
-def _jpeg_main(buf, end: int) -> tuple[int, int, int, bool, str] | None:
+def _jpeg_main(buf, end: int, start: int = 0) -> tuple[int, int, int, bool, str] | None:
     """The main image's SOS: (SOS start, SOS end, data end, EOI found, why it stopped) — the SOS whose image
-    data runs longest (an EXIF thumbnail's SOS comes first but stops at the thumbnail's EOI)."""
+    data runs longest (an EXIF thumbnail's SOS comes first but stops at the thumbnail's EOI); from START
+    (past the APPn segments, whose thumbnail isn't the photo)."""
     best = None
     covered = -1
-    for i, m in enumerate(_JPEG_SOS.finditer(buf, 0, min(end, 32 * MiB))):
+    for i, m in enumerate(_JPEG_SOS.finditer(buf, start, min(end, 32 * MiB))):
         if i > 256:
             break
         at = m.start()
@@ -491,6 +499,307 @@ def _jpeg_reference(reference) -> tuple[bytes | None, dict, str]:
     return header + data[main[0]:main[1]], info, ""
 
 
+_JPEG_RST_EOI = re.compile(rb"\xff[\xd0-\xd7\xd9]")
+_HIGH_BYTES = bytes(range(128, 256))
+
+
+def _jpeg_bytes(buf, header: list) -> bytes:
+    """The header's pieces (input ranges and bytes) joined."""
+    return b"".join(bytes(buf[p[0]:p[1]]) if isinstance(p, tuple) else p for p in header)
+
+
+def _jpeg_apps_end(buf) -> int:
+    """Where the APPn segments (EXIF, its thumbnail inside) that follow the start marker end."""
+    pos = 2
+    while pos + 4 <= len(buf) and buf[pos] == 0xFF and 0xE0 <= buf[pos + 1] <= 0xEF:
+        nxt = pos + 2 + _be16(buf, pos + 2)
+        if nxt > len(buf):
+            return len(buf)
+        pos = nxt
+    return pos if pos > 2 else 0
+
+
+def _jpeg_segment_ok(buf, mk: int, start: int, end: int) -> bool | None:
+    """Whether the table or frame segment from START to END is well formed (None: an APPn or comment,
+    which can hold anything)."""
+    body = bytes(buf[start + 4:end])
+    p = 0
+    if mk == 0xC4:
+        while p < len(body):
+            if p + 17 > len(body) or body[p] >> 4 > 1 or body[p] & 15 > 3 or sum(body[p + 1:p + 17]) > 256:
+                return False
+            p += 17 + sum(body[p + 1:p + 17])
+        return p == len(body) > 0
+    if mk == 0xDB:
+        while p < len(body):
+            if body[p] >> 4 > 1 or body[p] & 15 > 3:
+                return False
+            p += 1 + 64 * (1 + (body[p] >> 4))
+        return p == len(body) > 0
+    if mk in _SOF_ALL:
+        return len(body) >= 6 and body[0] in (8, 12, 16) and 1 <= body[5] <= 4 and len(body) == 6 + 3 * body[5]
+    if mk == 0xDD:
+        return len(body) == 2
+    return None
+
+
+def _jpeg_resync(buf, soi: int, sos_at: int) -> tuple[list, int] | None:
+    """A header with other data between its segments: the whole segments from the start marker at SOI to
+    the SOS at SOS_AT, in order, and how many bytes lie between them. None unless that leaves one frame
+    header and quantisation tables."""
+    segs: list[tuple[int, int, int]] = []
+    pos, skipped = soi + 2, 0
+    while pos < sos_at and len(segs) < 4000:
+        mk = buf[pos + 1] if pos + 1 < sos_at else 0
+        if buf[pos] == 0xFF and pos + 4 <= sos_at and (mk in _SOF_ALL or mk in (0xC4, 0xDB, 0xDD, 0xFE) or
+                                                     0xE0 <= mk <= 0xEF):
+            nxt = pos + 2 + _be16(buf, pos + 2)
+            ok = _jpeg_segment_ok(buf, mk, pos, nxt) if pos + 4 <= nxt <= sos_at else False
+            if ok is None:                            # an APPn or comment: whole if a marker comes right after it
+                ok = nxt == sos_at or (nxt < sos_at - 1 and buf[nxt] == 0xFF and buf[nxt + 1] not in (0, 0xFF))
+            if ok:
+                segs.append((mk, pos, nxt))
+                pos = nxt
+                continue
+        m = _JPEG_HEADER_MARK.search(buf, pos + 1, sos_at)
+        nxt = m.start() if m else sos_at
+        if b"\xff\xd8" in bytes(buf[pos:nxt]):
+            return None                               # another photo's header (an EXIF thumbnail): not this one's
+        skipped += nxt - pos
+        pos = nxt
+    if not skipped or sum(1 for s in segs if s[0] in _SOF_ALL) != 1 or not any(s[0] == 0xDB for s in segs):
+        return None
+    return segs + [(0xDA, sos_at, sos_at + 2 + _be16(buf, sos_at + 2))], skipped
+
+
+def _jpeg_suspect(buf, start: int, end: int, dri: int, progressive: bool, mcus: int) -> bool:
+    """Cheap signs that the picture data of a photo that reaches its end marker is damaged inside: restart
+    markers out of turn, too many or too few (or in a photo without a restart interval), or a 4 KiB cluster
+    of text in it."""
+    n = 0
+    for m in _JPEG_RST.finditer(buf, start, end):
+        if not dri or not progressive and buf[m.start() + 1] != 0xD0 + n % 8:
+            return True
+        n += 1
+    if dri and not progressive and mcus and n != -(-mcus // dri) - 1:
+        return True
+    for i in range(start + (-start) % 4096, end - 4096, 4096):
+        if buf.find(b"\xff", i, i + 4096) < 0:
+            blk = bytes(buf[i:i + 4096])
+            if len(blk.translate(None, _HIGH_BYTES)) * 8 >= len(blk) * 7:
+                return True
+    return False
+
+
+def _jpeg_cut(buf, dec, good_end: int, good_bit: int, start: int, mcus: int, preds) -> list:
+    """The picture data from START up to the last good MCU, which ends at bit GOOD_BIT of the byte at GOOD_END,
+    then MCUS grey MCUs that carry on the bit stream from there (DC predictors PREDS), so the photo keeps its
+    full size and decodes without errors. When its tables can't code grey, that last byte is just padded
+    with 1 bits (and a stuffed zero follows it if it becomes 0xFF)."""
+    out: list = [(start, good_end)]
+    part = (buf[good_end] >> (8 - good_bit), good_bit) if good_bit and good_end < len(buf) else (0, 0)
+    grey = dec.grey(max(0, mcus), preds, part)
+    if grey is not None:
+        return out + [grey]
+    if part[1]:
+        b = buf[good_end] | ((1 << (8 - good_bit)) - 1)
+        out.append(bytes([b]) + (b"\x00" if b == 0xFF else b""))
+    return out
+
+
+def _jpeg_interval(dec, seg: bytes, j: int):
+    """SEG decoded as restart interval J of the photo: (whether all of it decodes and fits exactly, the
+    jpegdec Probe)."""
+    from .media import jpegdec
+    sc = dec.scans[0]
+    ri = dec.restart_interval
+    want = min(ri, sc.total - j * ri)
+    term = b"\xff\xd9" if (j + 1) * ri >= sc.total else bytes((0xFF, 0xD0 + j % 8))
+    cp = jpegdec.Checkpoint(0, j * ri, 0, 0, (0,) * len(dec.frame.comps), 0)
+    pr = dec.probe(cp, seg + term, want)
+    return pr.mcus == want and not pr.error, pr
+
+
+def _jpeg_true_end(buf, dec, start: int, end: int) -> int:
+    """After damage in a photo with restart markers: just after the first end marker from START whose last
+    restart interval decodes (the photo's real end), else END."""
+    count = -(-dec.scans[0].total // dec.restart_interval)
+    last = start
+    for i, m in enumerate(_JPEG_RST_EOI.finditer(buf, start, end)):
+        if i > 1_000_000:
+            break
+        if buf[m.start() + 1] != 0xD9:
+            last = m.end()
+            continue
+        if _jpeg_interval(dec, bytes(buf[last:m.start()]), count - 1)[0]:
+            return m.end()
+        last = m.end()
+    return end
+
+
+def _jpeg_restarts(buf, dec, start: int, stop: int) -> tuple[list, int, int, float] | None:
+    """The picture data (START to STOP) of a baseline photo with restart markers, with every restart interval
+    that doesn't decode replaced by grey coded with the photo's own tables (the MCUs of a damaged interval
+    that decode before the damage are kept), so the rest of the picture shows in its place, and the photo
+    keeps its full size: (pieces ending with the end marker, intervals replaced, intervals in all, the share
+    of the picture's MCUs kept)."""
+    ri = dec.restart_interval
+    total = dec.scans[0].total
+    count = -(-total // ri)
+    grey_mid, grey_last = dec.grey(ri), dec.grey(total - (count - 1) * ri)
+    if grey_mid is None or grey_last is None:
+        return None
+    out: list = []
+    state = {"j": 0, "replaced": 0, "kept": 0}
+    damaged = 0                                       # bytes of damaged data since the last good interval
+    lens: list[int] = []
+    partial = None                                    # (start, probe) of the damaged interval that follows a good one
+
+    def size(k: int) -> int:
+        return min(ri, total - k * ri)
+
+    def marker(k: int) -> bytes:
+        return bytes((0xFF, 0xD0 + k % 8)) if k < count - 1 else b""
+
+    def fill(upto: int) -> None:
+        """Grey intervals up to UPTO (the first one keeps the MCUs of PARTIAL that decode)."""
+        nonlocal partial
+        while state["j"] < min(upto, count):
+            k = state["j"]
+            if partial is not None and partial[1].mcus:
+                s, pr = partial
+                out.extend(_jpeg_cut(buf, dec, s + pr.end_bit // 8, pr.end_bit & 7, s, size(k) - pr.mcus,
+                                     pr.preds))
+                state["kept"] += pr.mcus
+            else:
+                out.append(grey_last if k == count - 1 else grey_mid)
+            out.append(marker(k))
+            partial = None
+            state["j"] += 1
+            state["replaced"] += 1
+
+    pos = start
+    segs = []
+    for m in _JPEG_RST_EOI.finditer(buf, start, stop):
+        segs.append((pos, m.start(), buf[m.start() + 1]))
+        pos = m.end()
+    if pos < stop:
+        segs.append((pos, stop, -1))
+    for s, e, mk in segs:
+        j = state["j"]
+        if j >= count:
+            break
+        seg = bytes(buf[s:e])
+        if mk == 0xD9 and e + 2 >= stop:              # the photo's last interval
+            ok, _pr = _jpeg_interval(dec, seg, count - 1)
+            if ok:
+                fill(count - 1)
+                out.append((s, e))
+                state["kept"] += size(count - 1)
+                state["j"] = count
+            break
+        if mk == -1:                                  # the data ends: keep what decodes of this interval
+            if not damaged:
+                partial = (s, _jpeg_interval(dec, seg, min(j, count - 1))[1])
+            break
+        ok, pr = _jpeg_interval(dec, seg, min(j, count - 2))
+        if not ok or mk == 0xD9:
+            if not damaged and mk != 0xD9:
+                partial = (s, pr)
+            damaged += e - s + 2
+            continue
+        idx = j
+        if damaged:                                   # resynchronise on the restart marker's number
+            idx = j + (mk - 0xD0 - j) % 8
+            if lens:
+                est = damaged / (sum(lens) / len(lens))
+                idx += 8 * max(0, round((est - (idx - j)) / 8))
+        if idx >= count - 1:
+            damaged += e - s + 2
+            continue
+        fill(idx)
+        out.append((s, e + 2) if mk == 0xD0 + idx % 8 else (s, e))
+        if mk != 0xD0 + idx % 8:
+            out.append(marker(idx))
+        state["j"] = idx + 1
+        state["kept"] += ri
+        damaged = 0
+        partial = None
+        lens.append(e - s)
+    fill(count)                                       # what is still missing (a cut-short photo): grey
+    return out + [b"\xff\xd9"], state["replaced"], count, state["kept"] / total
+
+
+def _missing(shown: float) -> str:
+    """"the bottom 38 % of the photo is missing" for SHOWN (the share of the picture that decodes)."""
+    if shown >= 1:
+        return "its picture data is all there"
+    pct = min(100, max(1, round(100 * (1 - shown))))
+    return f"the bottom {pct} % of the photo is missing" if pct < 100 else "none of the picture is left"
+
+
+def _jpeg_data(plan: Plan, buf, dec, data_start: int, data_end: int, eoi: bool, why: str, end: int) -> list | None:
+    """What to do with picture data that DEC (its decoding) found incomplete: its pieces (ending with the end
+    marker) when it is damaged inside or a progressive photo is cut short, or None to keep it as it is
+    (simply cut short: plan.info["shown"] says how much of the picture is there)."""
+    from .media import jpegdec
+    first = dec.scans[0]
+    if len(dec.scans) > 1 or dec.progressive:
+        done = [s for s in dec.scans if s.complete]
+        dc = {c for s in done if s.ss == 0 and s.ah == 0 for c in s.comps}
+        if done and len(dc) == len(dec.frame.comps):
+            k = len(done)
+            cut = dec.error == jpegdec.ERR_CUT and why != "damaged"
+            plan.problem(f"The photo is {'cut short' if cut else 'damaged'} in pass {k + 1} of its picture data "
+                         "(it was saved progressively, in passes that each sharpen the whole picture)",
+                         f"End it after its last complete pass ({k}): the whole picture shows, less sharp")
+            plan.info["shown"] = 1.0
+            return [(data_start, done[-1].end), b"\xff\xd9"]
+    shown = first.decoded / first.total if first.total else 0.0
+    plan.info["shown"] = round(shown, 3)
+    clean = dec.error == jpegdec.ERR_CUT and why != "damaged" and (dec.error_offset or 0) >= data_end - 1
+    if clean:
+        return None
+    if dec.restart_interval and dec.restart_interval < first.total and len(dec.scans) == 1 and not dec.progressive:
+        stop = data_end if eoi else _jpeg_true_end(buf, dec, dec.error_offset or data_end, end)
+        got = _jpeg_restarts(buf, dec, data_start, stop)
+        if got is not None and got[1] < got[2]:
+            pieces, replaced, count, kept = got
+            plan.problem(f"The picture data is damaged in {replaced} of its {count} restart intervals (from byte "
+                         f"{dec.error_offset} on)",
+                         f"Replace the damaged stretch{'es' if replaced != 1 else ''} with grey: the rest of the "
+                         "photo shows in its place")
+            plan.info["shown"] = round(kept, 3)
+            return pieces
+    if not first.decoded:
+        plan.problem("The picture data doesn't decode from its start: the photo's tables (its header) don't fit "
+                     "its data, or the data is damaged right after them")
+        return None
+    plan.problem(f"The picture data is damaged from byte {dec.error_offset} on: {_missing(shown)}",
+                 "Keep the picture up to the damage and fill the rest with grey")
+    return _jpeg_cut(buf, dec, dec.good_end, dec.good_bit, data_start, first.total - first.decoded,
+                     dec.preds) + [b"\xff\xd9"]
+
+
+def _jpeg_preview(plan: Plan, buf) -> bool:
+    """When the photo itself can't be saved: make its embedded preview (the EXIF thumbnail, a large preview
+    of its MP extension) the repaired copy. True if it has one."""
+    from .media import rawpreview
+    try:
+        pv = rawpreview.best_preview(buf)
+    except (struct.error, IndexError, ValueError, OverflowError):
+        pv = None
+    if pv is None or not pv.width:
+        return False
+    plan.actions.append(f"Save the preview the camera stored inside the photo ({pv.width}×{pv.height}) instead: "
+                        "the full-size picture can't be saved")
+    plan.info.update(preview=pv.describe(), output="preview")
+    pieces = [(pv.offset, pv.end)] + ([] if pv.valid is not False else [b"\xff\xd9"])
+    plan.repairable = True
+    plan.build = lambda: pieces
+    return True
+
+
 def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTROL) -> Plan:
     plan = Plan("jpg")
     end = len(buf)
@@ -498,19 +807,23 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
         plan.problem("The file is empty or almost empty")
         plan.note = "There is nothing to repair."
         return plan
-    main = _jpeg_main(buf, end)
     soi = 0 if bytes(buf[:3]) == b"\xff\xd8\xff" else buf.find(b"\xff\xd8\xff", 0, min(end, 1 * MiB))
+    apps_end = _jpeg_apps_end(buf) if soi == 0 else 0
+    main = _jpeg_main(buf, end, apps_end)
     if main is None and soi >= 0 and reference is None:
         _segs, err = _jpeg_walk(buf, soi + 2, end)
         if err in ("the file ends inside the header", "no image data found"):
             plan.problem("The file is cut short before the picture data starts")
             plan.note = "Only the photo's header is left: there is no picture to show."
+            if _jpeg_preview(plan, buf):
+                plan.note = "Only the photo's header is left, with the small preview the camera stored in it."
             return plan
 
     # the header: from the start marker straight to the image data, else the intact segments just before it
     header: list | None = None
     segs: list = []
     lead = 0
+    from_reference = False
     if main is not None and soi >= 0:
         segs, err = _jpeg_walk(buf, soi + 2, end, stop_at=main[0])
         if not err:
@@ -531,7 +844,15 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
                          "Rebuild the header from the intact tables just before the picture data (the camera "
                          "details are lost)")
         else:
-            segs = []
+            got = _jpeg_resync(buf, soi, main[0]) if soi >= 0 else None
+            if got is not None:                       # other data between the header's segments
+                segs, skipped = got
+                header = [b"\xff\xd8", *[(s, e) for _m, s, e in segs[:-1]], (main[0], main[1])]
+                lead = soi
+                plan.problem(f"{_n(skipped)} of other data lie between the parts of the photo's header",
+                             f"Cut out the {_n(skipped)} between them")
+            else:
+                segs = []
     info = _jpeg_info(buf, segs)
     if header is not None:
         if lead > 0:
@@ -549,10 +870,14 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
         if reference is None:
             plan.note = ("Choose a reference photo taken with the same camera at the same size and quality: its "
                          "header can replace the missing one.")
+            plan.info["needs_reference"] = True
+            if _jpeg_preview(plan, buf):
+                plan.note += " Without one, the repaired copy is the small preview the camera stored in the photo."
             return plan
         ref_header, rinfo, ref_err = _jpeg_reference(reference)
         if ref_header is None:
             plan.note = f"The reference photo can't be used: {ref_err}."
+            _jpeg_preview(plan, buf)
             return plan
         ref_name = Path(str(reference)).name
         if main is not None:
@@ -563,9 +888,10 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
                              f"{own[1]}×{own[2]}: the result will probably look wrong.")
             plan.actions.append(f"Use the header of {ref_name} with this photo's picture data")
         else:
-            start = data_offset if data_offset is not None else _entropy_start(buf, 0, end, rinfo["dri"])
+            start = data_offset if data_offset is not None else _entropy_start(buf, apps_end, end, rinfo["dri"])
             if start is None or not 0 <= start < end:
                 plan.note = "No picture data was found in the file."
+                _jpeg_preview(plan, buf)
                 return plan
             data_start = start
             data_end, eoi, why = _jpeg_scan(buf, data_start, end)
@@ -574,6 +900,7 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
             plan.info["data_offset"] = data_start
         header = [ref_header]
         info = rinfo
+        from_reference = True
 
     # the end of the picture data
     tail_keep = 0
@@ -589,18 +916,67 @@ def _jpeg(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
                 plan.problem(f"{_n(trailing)} of other data come after the end of the photo",
                              f"Cut the {_n(trailing)} after the end of the photo")
     else:
-        if why == "file":
-            plan.problem("The photo has no end: another file starts in the middle of it",
-                         "End the photo where the other file starts (the missing part shows gray)")
-        elif why == "damaged":
-            plan.problem(f"The picture data is damaged from byte {data_end} on",
-                         "Keep the picture data up to the damage and end the photo there (the rest shows gray)")
-        else:
-            plan.problem("The photo is cut short (no end marker)",
-                         "Add the end marker: the part that is there shows, the rest is gray")
         data_end = _strip_zeros(buf, data_start, data_end)
-    pieces = _merge([*header, (data_start, data_end), b"" if eoi else b"\xff\xd9",
-                     (data_end, tail_keep) if tail_keep else b""])
+
+    # the picture data, checked by decoding it when it has no end, could take another header, or looks damaged
+    # (not when its start is a guess)
+    data: list | None = None
+    if "data_offset" not in plan.info:
+        from .media import jpegdec
+        hdr = _jpeg_bytes(buf, header)
+        t = jpegdec.tables_of(hdr)
+        frame = t["sof"]
+        # the start of the data always (do the tables fit it?), all of it when there is a reason to
+        head = jpegdec.decode_check(buf, data_start, min(data_end, data_start + 64 * KiB), header=hdr)
+        dec = head if data_end <= data_start + 64 * KiB else None
+        if dec is None and (frame is None or head.error not in ("", jpegdec.ERR_CUT) or not eoi or
+                            _jpeg_suspect(buf, data_start, data_end, t["dri"], frame.progressive, frame.mcus)):
+            dec = jpegdec.decode_check(buf, data_start, data_end, header=hdr)
+        if dec is not None and reference is not None and not from_reference and dec.supported and \
+                (dec.error == jpegdec.ERR_HEADER or dec.scans and dec.fraction < 0.5 and dec.error != jpegdec.ERR_CUT):
+            ref_header, rinfo, _err = _jpeg_reference(reference)
+            alt = jpegdec.decode_check(buf, data_start, data_end, header=ref_header) if ref_header else None
+            if alt is not None and alt.scans and (alt.ok or alt.fraction > dec.fraction + 0.05 or
+                                                  dec.error == jpegdec.ERR_HEADER and alt.error != jpegdec.ERR_HEADER):
+                plan.problem("The photo's tables (in its header) are damaged: its picture data doesn't decode "
+                             "with them",
+                             f"Use the header of {Path(str(reference)).name}, whose tables fit this photo's data")
+                header, info, dec = [ref_header], rinfo, alt
+        if dec is not None and dec.error == jpegdec.ERR_HEADER:
+            plan.problem("The photo's tables (in its header) are damaged")
+            plan.note = ("Choose a reference photo taken with the same camera at the same size and quality: its "
+                         "tables can replace the damaged ones.")
+            plan.info["needs_reference"] = True
+            _jpeg_preview(plan, buf)
+            return plan
+        if dec is not None and dec.supported and dec.scans and not dec.ok and not (
+                len(dec.scans) == 1 and not dec.progressive and dec.scans[0].decoded == dec.scans[0].total):
+            data = _jpeg_data(plan, buf, dec, data_start, data_end, eoi, why, end)
+            if data is None and not dec.scans[0].decoded and not (dec.error == jpegdec.ERR_CUT and why != "damaged"):
+                plan.note = ("Choose a reference photo taken with the same camera at the same size and quality: its "
+                             "tables may fit this photo's data.")
+                plan.info["needs_reference"] = True
+                _jpeg_preview(plan, buf)
+                return plan
+    if data is None and not eoi:
+        shown = plan.info.get("shown")
+        if shown is not None and shown < 0.01 and _jpeg_preview(plan, buf):
+            plan.problem("The photo is cut short right after its header: none of its picture is left")
+            plan.note = "The repaired copy is the small preview the camera stored in the photo."
+            return plan
+        more = f": {_missing(shown)}" if shown is not None else ""
+        if why == "file":
+            plan.problem("The photo has no end: another file starts in the middle of it" + more,
+                         "End the photo where the other file starts (the missing part shows grey)")
+        elif why == "damaged":
+            plan.problem(f"The picture data is damaged from byte {data_end} on" + more,
+                         "Keep the picture data up to the damage and end the photo there (the rest shows grey)")
+        else:
+            plan.problem("The photo is cut short (no end marker)" + more,
+                         "Add the end marker: the part that is there shows, the rest is grey")
+    if data is None:
+        data = [(data_start, data_end), b"" if eoi else b"\xff\xd9"]
+    pieces = _merge([*header, *data, (data_end, tail_keep) if tail_keep else b""])
     if info.get("sof"):
         plan.info["size"] = f"{info['sof'][1]}×{info['sof'][2]}"
     plan.repairable = True
