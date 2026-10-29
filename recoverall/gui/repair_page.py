@@ -362,9 +362,11 @@ class RepairPage(OperationPage):
                         line += f"<br><span style='opacity:.75'>{html.escape(r['note'])}</span>"
                     rows.append(line)
                 self.analysis.setText("<br><br>".join(rows))
+        ref = self.ref.text().strip() or None
         for p in paths:
             self.bridge.call("file_analyze", done=lambda a, p=p: got(p, a),
-                             error=lambda e, p=p: got(p, {"problems": [str(e)], "repairable": False}), path=p)
+                             error=lambda e, p=p: got(p, {"problems": [str(e)], "repairable": False}), path=p,
+                             reference=ref)
 
     def _repair_files(self) -> None:
         paths = self._paths()

@@ -860,7 +860,7 @@ class DemoAPI(LocalAPI):
                                 {"paths": paths})
         return job.public()
 
-    def file_analyze(self, path: str) -> dict:
+    def file_analyze(self, path: str, reference: str | None = None) -> dict:
         return {"type": os.path.splitext(path)[1].lstrip(".").lower() or "jpg",
                 "problems": ["The file ends in the middle of the picture data (no end marker)"], "repairable": True,
                 "actions": ["Add the missing end marker"]}

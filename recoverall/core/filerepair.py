@@ -2031,12 +2031,13 @@ def _plan(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTR
         return plan
 
 
-def analyze(path: str | Path) -> dict:
+def analyze(path: str | Path, reference: str | Path | None = None) -> dict:
     """What is wrong with the file at PATH: {"type", "name", "problems" (plain sentences; [] when it is fine),
     "repairable", "actions" (what repair() would do), "note" (limitations, or what would help), "size",
-    "supported", "info"}."""
+    "supported", "info"}. With a REFERENCE, what a repair with it would do."""
     with _mapped(path) as buf:
-        plan = _plan(buf, path)
+        kind = detect(buf, path)
+        plan = _plan(buf, path, reference if reference and _kind(kind) in REFERENCE_KINDS else None)
         size = len(buf)
     repairable = plan.repairable and bool(plan.problems)
     return {"type": plan.type, "name": NAMES.get(plan.type, plan.type.upper()), "problems": plan.problems,

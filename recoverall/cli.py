@@ -666,14 +666,30 @@ def cmd_fixfile(api, args) -> int:
     paths = [os.path.abspath(p) for p in args.files]
     if args.check:
         for p in paths:
-            a = api.file_analyze(path=p)
+            a = api.file_analyze(path=p, reference=os.path.abspath(args.reference) if args.reference else None)
             print(bold(os.path.basename(p)) + dim(f"  {a.get('type')}"))
             for prob in a.get("problems") or []:
                 print(yellow("  ! " + prob))
             if not a.get("problems"):
                 print(green("  ✓ looks fine"))
+            elif a.get("repairable"):
+                for act in a.get("actions") or []:
+                    print(dim("  → " + act))
+            if a.get("problems") and a.get("note"):
+                print(dim("  " + a["note"]))
         return 0
     out = os.path.abspath(args.out or os.path.dirname(paths[0]))
+    if args.raw_streams:
+        from .core.media import mp4repair
+        n = 0
+        for p in paths:
+            written = mp4repair.salvage(p, out, reference=os.path.abspath(args.reference) if args.reference else None)
+            for w in written:
+                print(green("✓ ") + str(w))
+            if not written:
+                print(yellow(f"! {os.path.basename(p)}: no stream could be saved (give --reference?)"))
+            n += len(written)
+        return 0 if n else 1
     job = api.start_file_repair(paths=paths, out_dir=out, reference=args.reference)
     j = follow(api, job, args, verbose_log=True)
     return 0 if j["state"] == "done" else 1
@@ -903,12 +919,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--partition", "-p", type=int)
     p.add_argument("--fstype")
     p.add_argument("--superblock", type=int, help="ext: use this backup superblock")
-    p = sub.add_parser("fix-file", help="repair damaged files (JPEG, PNG, ZIP/Office, PDF, WAV/AVI, …)")
+    p = sub.add_parser("fix-file", help="repair damaged files: videos (MP4/MOV, MKV, MTS, MPG, WMV, FLV, AVI), "
+                                        "photos, ZIP/Office, PDF, sound…")
     p.add_argument("files", nargs="+")
     p.add_argument("--out", help="folder for the repaired copies")
     p.add_argument("--reference", help="a good file from the same camera: a finished recording with the same "
                    "settings rebuilds unfinished videos; a photo rebuilds lost JPEG headers")
     p.add_argument("--check", action="store_true", help="only say what's wrong")
+    p.add_argument("--raw-streams", action="store_true",
+                   help="MP4/MOV without an index: save the picture and sound as raw .h264/.hevc and .aac streams")
 
     p = sub.add_parser("image", help="copy a disk to an image file first (failing disks!)")
     source_args(p)

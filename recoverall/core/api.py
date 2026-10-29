@@ -462,9 +462,9 @@ class LocalAPI:
                                 {"source": source, "action": action, "offset": offset, "fstype": fstype})
         return job.public()
 
-    def file_analyze(self, path: str) -> dict:
+    def file_analyze(self, path: str, reference: str | None = None) -> dict:
         from .filerepair import analyze
-        return analyze(path)
+        return analyze(path, reference)
 
     def start_file_repair(self, paths: list[str], out_dir: str, reference: str | None = None) -> dict:
         from .filerepair import repair_many
