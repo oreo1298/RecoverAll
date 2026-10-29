@@ -906,7 +906,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("fix-file", help="repair damaged files (JPEG, PNG, ZIP/Office, PDF, WAV/AVI, …)")
     p.add_argument("files", nargs="+")
     p.add_argument("--out", help="folder for the repaired copies")
-    p.add_argument("--reference", help="a good file from the same camera/program (JPEG headers)")
+    p.add_argument("--reference", help="a good file from the same camera: a finished recording with the same "
+                   "settings rebuilds unfinished videos; a photo rebuilds lost JPEG headers")
     p.add_argument("--check", action="store_true", help="only say what's wrong")
 
     p = sub.add_parser("image", help="copy a disk to an image file first (failing disks!)")
