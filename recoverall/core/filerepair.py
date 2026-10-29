@@ -23,8 +23,11 @@ WebP, AIFF     files); data after the last complete chunk cut; a missing AVI ind
 GZIP, BZ2, XZ  the readable beginning of the content is saved (not recompressed), with how much was readable.
 MP3            other data before the first frame (or ID3 tag) and after the last frame cut; damaged stretches
                in the middle dropped.
-MP4/MOV        only data after the last box is cut and a cut-short mdat sized to what is there; a recording
-               without its index (moov box) can't be rebuilt without a reference recording, and analyze() says so.
+MP4/MOV/3GP    a recording without its index (moov box: battery, crash, card removed) is rebuilt from its frames,
+               learning tracks, codecs, timing and interleaving from a REFERENCE recording of the same camera (or
+               from the stream alone when it repeats its parameter sets: picture only); a cut-short file keeps its
+               complete frames with shortened sample tables; fragmented files lose an incomplete last fragment;
+               data after the end is cut (media/mp4repair.py).
 =============  ===================================================================================================
 
 The input file is never modified: repairs are written to a new file. Everything here is standard library
@@ -1916,53 +1919,9 @@ def _mp3(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTRO
 
 # ---------------------------------------------------------------------- MP4 / QuickTime
 def _mp4(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTROL) -> Plan:
-    end = len(buf)
-    t = _mp4_like(bytes(buf[:12])) or detect(buf, path)
-    plan = Plan(t if t in ("mp4", "mov") else "mp4")
-    pos = 0
-    boxes = []
-    patches: dict[int, bytes] = {}
-    real_end = 0
-    while pos + 8 <= end and len(boxes) < 100000:
-        size = struct.unpack_from(">I", buf, pos)[0]
-        btype = bytes(buf[pos + 4:pos + 8])
-        if not _ascii4(btype):
-            break
-        hdr = 8
-        if size == 1:
-            if pos + 16 > end:
-                break
-            size, hdr = struct.unpack_from(">Q", buf, pos + 8)[0], 16
-        elif size == 0:
-            size = end - pos
-        if size < hdr:
-            break
-        boxes.append(btype)
-        if pos + size > end:
-            if btype == b"mdat":
-                plan.problem("The video data (mdat) is cut short", "Set the size of the video data to what is there")
-                patches[pos] = struct.pack(">I", end - pos) if hdr == 8 else \
-                    struct.pack(">I", 1) + btype + struct.pack(">Q", end - pos)
-            else:
-                plan.problem(f"The file is cut short inside its “{btype.decode(errors='replace')}” box")
-            real_end = end
-            break
-        pos += size
-        real_end = pos
-    if b"moov" not in boxes:
-        plan.problem("The recording's index (the moov box) is missing: the recording wasn't finished (battery, "
-                     "crash, card removed)" if b"mdat" in boxes else "The file's structure is damaged")
-        plan.note = ("A video without its moov box can only be rebuilt with a reference recording made by the same "
-                     "camera with the same settings (tools such as untrunc do that); RecoverAll can't.")
-        return plan
-    if real_end < end:
-        plan.problem(f"{_n(end - real_end)} of other data come after the end", f"Cut the {_n(end - real_end)} at the end")
-    if not plan.problems:
-        return plan
-    pieces = _patched(0, real_end, patches)
-    plan.repairable = True
-    plan.build = lambda: pieces
-    return plan
+    # MP4, MOV, 3GP, M4V: media/mp4repair.py (cut-short files, fragments, and rebuilding a missing index)
+    from .media import mp4repair
+    return mp4repair.plan(buf, path, reference=reference, data_offset=data_offset, ctl=ctl)
 
 
 # ---------------------------------------------------------------------- the API
@@ -2129,7 +2088,7 @@ def repair_many(paths: list[str | Path], out_dir: str | Path, reference: str | P
             k += 1
         used.add(target.name)
         try:
-            r = repair(p, target, reference if kind == "jpg" else None, ctl)
+            r = repair(p, target, reference if kind in ("jpg", "mp4", "mov") else None, ctl)
         except Cancelled:
             raise
         except RallError as exc:

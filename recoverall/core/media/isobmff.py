@@ -15,8 +15,15 @@ stsc     sample to chunk: runs of (first chunk, samples per chunk, description i
 stco     chunk offsets (32-bit); co64 the 64-bit form
 =======  ==================================================================================================
 
+Fragmented files (recorded for streaming, and by some cameras) keep an empty sample table and put the samples
+in movie fragments instead: a moof box (track fragment headers with defaults, and track runs listing each
+sample's size, duration, flags and composition offset) before the mdat that holds them.
+
 Everything here reads from anything that slices like bytes (bytes, bytearray, mmap) and never raises on a
 damaged file: what can't be read is left out, and :attr:`Box.truncated` says when a box runs past the data.
+For writing there are the box builders (:func:`box`, :func:`full_box`), the sample tables from lists
+(:func:`stts_box`, :func:`stco_box`, ...), edit lists, header fields with a new duration, and :func:`rewrite`,
+which rebuilds a box tree with some boxes replaced (the media repair uses it to shorten or replace tables).
 """
 
 from __future__ import annotations
@@ -440,20 +447,327 @@ def movie_of(buf) -> tuple[Movie | None, list[Box]]:
 
 
 def describe(buf) -> dict:
-    """What a movie is, for previews: {"duration" (s), "width", "height", "video", "audio", "fps",
-    "channels", "sample_rate", "tracks", "fragmented"}; {} without a readable movie box."""
-    m, _boxes = movie_of(buf)
+    """What a movie is, for previews: {"has_index", "duration" (s), "width", "height", "video", "audio",
+    "fps", "frames", "channels", "sample_rate", "tracks", "fragmented"}. BUF is the file's bytes (anything that
+    slices like bytes) or its path. A file whose index is missing gives {"has_index": False, "fragmented"};
+    {} when it isn't an ISO media file at all."""
+    if isinstance(buf, str) or hasattr(buf, "__fspath__"):
+        import mmap
+        import os
+        with open(buf, "rb") as f:
+            if not os.fstat(f.fileno()).st_size:
+                return {}
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+                return describe(m)
+    m, boxes = movie_of(buf)
     if m is None:
+        kinds = {b.type for b in boxes}
+        if kinds & {b"mdat", b"moof", b"ftyp"}:
+            return {"has_index": False, "fragmented": b"moof" in kinds}
         return {}
-    out: dict = {"tracks": len(m.tracks), "fragmented": m.fragmented}
+    out: dict = {"has_index": True, "tracks": len(m.tracks), "fragmented": m.fragmented}
     if m.timescale:
         out["duration"] = round(m.duration / m.timescale, 3)
     v = m.track("vide")
     if v is not None:
-        out.update(video=v.codec, width=v.width, height=v.height)
+        out.update(video=v.codec, width=v.width, height=v.height, frames=v.samples)
         if v.timescale and v.samples and v.duration:
             out["fps"] = round(v.samples * v.timescale / v.duration, 3)
     a = m.track("soun")
     if a is not None:
         out.update(audio=a.codec, channels=a.channels, sample_rate=a.sample_rate)
     return out
+
+
+# ---------------------------------------------------------------------- edit lists and header fields
+def parse_elst(edts: bytes) -> list[tuple[int, int, float]]:
+    """The entries of the edit list in an edts box: (segment duration in the movie timescale, media time in the
+    media timescale or -1 for an empty edit, rate)."""
+    out: list[tuple[int, int, float]] = []
+    b = find(edts, "edts/elst")
+    if b is None:
+        return out
+    p = b.payload
+    try:
+        v = edts[p]
+        count = be32(edts, p + 4)
+        q = p + 8
+        for _ in range(min(count, 4096)):
+            if v == 1:
+                d, t = struct.unpack_from(">Qq", edts, q)
+                q += 16
+            else:
+                d, t = struct.unpack_from(">Ii", edts, q)
+                q += 8
+            rate = struct.unpack_from(">i", edts, q)[0] / 65536
+            q += 4
+            out.append((d, t, rate))
+    except (struct.error, IndexError):
+        pass
+    return out
+
+
+def edts_box(entries: list[tuple[int, int, float]]) -> bytes:
+    """An edts box holding an edit list of ENTRIES (as parse_elst returns them)."""
+    v = 1 if any(d > 0xFFFFFFFF or not -0x80000000 <= t <= 0x7FFFFFFF for d, t, _r in entries) else 0
+    body = [struct.pack(">I", len(entries))]
+    for d, t, rate in entries:
+        body.append(struct.pack(">Qq" if v else ">Ii", d, t) + struct.pack(">i", int(round(rate * 65536))))
+    return box("edts", full_box("elst", v, 0, *body))
+
+
+# where version 0 / version 1 full boxes keep their times and duration: (creation, modification, duration)
+_TIME_FIELDS = {b"mvhd": ((4, 8, 16, 4), (4, 12, 24, 8)), b"mdhd": ((4, 8, 16, 4), (4, 12, 24, 8)),
+                b"tkhd": ((4, 8, 20, 4), (4, 12, 28, 8))}
+
+
+def with_duration(raw: bytes, duration: int, clear_times: bool = False) -> bytes:
+    """A copy of the mvhd, tkhd or mdhd box RAW with DURATION (and creation/modification times 0 when
+    CLEAR_TIMES); a version 0 box becomes version 1 when the duration doesn't fit 32 bits."""
+    t = bytes(raw[4:8])
+    if t not in _TIME_FIELDS or len(raw) < 32:
+        return bytes(raw)
+    v = raw[8]
+    if v == 0 and duration > 0xFFFFFFFF:
+        raw = _to_version1(raw)
+        v = 1
+    c, m, d, w = _TIME_FIELDS[t][1 if v == 1 else 0]
+    out = bytearray(raw)
+    base = 8
+    if base + d + w > len(out):
+        return bytes(raw)
+    out[base + d:base + d + w] = duration.to_bytes(w, "big")
+    if clear_times:
+        tw = 8 if v == 1 else 4
+        out[base + c:base + c + tw] = bytes(tw)
+        out[base + m:base + m + tw] = bytes(tw)
+    return bytes(out)
+
+
+def _to_version1(raw: bytes) -> bytes:
+    """A version 0 mvhd/tkhd/mdhd box rewritten as version 1 (64-bit times and duration)."""
+    t = bytes(raw[4:8])
+    p = bytes(raw[12:])                                   # after size, type, version/flags
+    if t == b"tkhd":
+        creation, mod, tid, res, dur = struct.unpack_from(">IIIII", p, 0)
+        body = struct.pack(">QQIIQ", creation, mod, tid, res, dur) + p[20:]
+    else:
+        creation, mod, scale, dur = struct.unpack_from(">IIII", p, 0)
+        body = struct.pack(">QQIQ", creation, mod, scale, dur) + p[16:]
+    return full_box(t, 1, struct.unpack(">I", raw[8:12])[0] & 0xFFFFFF, body)
+
+
+def track_id_of(tkhd: bytes) -> int:
+    """The track ID in a tkhd box (or in a trak box that starts with its tkhd)."""
+    try:
+        if tkhd[4:8] == b"trak":
+            tkhd = tkhd[8:]
+        return be32(tkhd, 28 if tkhd[8] == 1 else 20)
+    except (struct.error, IndexError):
+        return 0
+
+
+# ---------------------------------------------------------------------- sample tables
+def runs(values) -> list[tuple[int, int]]:
+    """Run-length (count, value) pairs."""
+    out: list[list[int]] = []
+    for v in values:
+        if out and out[-1][1] == v:
+            out[-1][0] += 1
+        else:
+            out.append([1, v])
+    return [(c, v) for c, v in out]
+
+
+def stts_box(run_list: list[tuple[int, int]]) -> bytes:
+    """stts from (count, duration) runs."""
+    return full_box("stts", 0, 0, struct.pack(">I", len(run_list)),
+                    b"".join(struct.pack(">II", c, d) for c, d in run_list))
+
+
+def ctts_box(run_list: list[tuple[int, int]]) -> bytes:
+    """ctts from (count, offset) runs; version 1 when an offset is negative."""
+    v = 1 if any(o < 0 for _c, o in run_list) else 0
+    return full_box("ctts", v, 0, struct.pack(">I", len(run_list)),
+                    b"".join(struct.pack(">Ii" if v else ">II", c, o) for c, o in run_list))
+
+
+def stss_box(sync: list[int]) -> bytes:
+    """stss from 0-based sync sample indexes."""
+    return full_box("stss", 0, 0, struct.pack(">I", len(sync)), struct.pack(f">{len(sync)}I", *(k + 1 for k in sync)))
+
+
+def stsz_box(sizes, count: int | None = None, const: int = 0) -> bytes:
+    """stsz: one size for all COUNT samples (CONST), or a table of SIZES."""
+    if const:
+        return full_box("stsz", 0, 0, struct.pack(">II", const, count or 0))
+    if sizes and min(sizes) == max(sizes):
+        return full_box("stsz", 0, 0, struct.pack(">II", sizes[0], len(sizes)))
+    return full_box("stsz", 0, 0, struct.pack(">II", 0, len(sizes)), struct.pack(f">{len(sizes)}I", *sizes))
+
+
+def stsc_box(chunk_counts) -> bytes:
+    """stsc from the number of samples in every chunk (all with sample description 1)."""
+    entries = []
+    last = None
+    for i, n in enumerate(chunk_counts):
+        if n != last:
+            entries.append(struct.pack(">III", i + 1, n, 1))
+            last = n
+    return full_box("stsc", 0, 0, struct.pack(">I", len(entries)), b"".join(entries))
+
+
+def stco_box(offsets) -> bytes:
+    """stco, or co64 when an offset needs more than 32 bits."""
+    big = bool(offsets) and max(offsets) > 0xFFFFFFFF
+    return full_box("co64" if big else "stco", 0, 0, struct.pack(">I", len(offsets)),
+                    struct.pack(f">{len(offsets)}{'Q' if big else 'I'}", *offsets))
+
+
+# ---------------------------------------------------------------------- rewriting box trees
+REWRITE_CONTAINERS = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"mvex", b"moof", b"traf"}
+
+
+def rewrite(buf, b: Box, edit, path: tuple = ()) -> bytes:
+    """Box B rebuilt: EDIT(path, box) returns replacement bytes (b"" drops the box) or None to keep it; the
+    containers of REWRITE_CONTAINERS are rebuilt from their (edited) children, with new sizes. Boxes cut short
+    are left out (a cut-short container keeps its complete children)."""
+    p = path + (b.type,)
+    r = edit(p, b)
+    if r is not None:
+        return r
+    if b.type in REWRITE_CONTAINERS:
+        kids = list(children(buf, b))
+        if kids:
+            head = bytes(buf[b.payload:kids[0].start])
+            tail = bytes(buf[kids[-1].end:b.end]) if not b.truncated else b""
+            return box(b.type, head, *(rewrite(buf, c, edit, p) for c in kids), tail)
+    if b.truncated:
+        return b""                              # a box cut short (a damaged file): left out
+    return bytes(buf[b.start:b.end])
+
+
+# ---------------------------------------------------------------------- fragments
+@dataclass
+class FragTrack:
+    """The samples of one track found in the movie fragments (moof boxes) of a file."""
+    id: int
+    offsets: list[int] = field(default_factory=list)
+    sizes: list[int] = field(default_factory=list)
+    durations: list[int] = field(default_factory=list)
+    cts: list[int] = field(default_factory=list)
+    keys: list[bool] = field(default_factory=list)
+    runs: list[tuple[int, int, int]] = field(default_factory=list)    # (data offset, first sample, count)
+
+
+def trex_defaults(buf, moov: Box | None) -> dict[int, tuple[int, int, int, int]]:
+    """{track id: (description index, duration, size, flags)} from the mvex/trex boxes."""
+    out: dict[int, tuple[int, int, int, int]] = {}
+    if moov is None:
+        return out
+    for b in find_all(buf, "mvex/trex", moov.payload, moov.end):
+        p = b.payload
+        if b.end >= p + 24:
+            out[be32(buf, p + 4)] = struct.unpack_from(">IIII", buf, p + 8)
+    return out
+
+
+def parse_moof(buf, moof: Box, trex: dict, tracks: dict[int, FragTrack], strict_end: int | None = None) -> bool:
+    """Add the samples of the movie fragment MOOF to TRACKS {id: FragTrack}. False when the fragment is
+    damaged or its samples run past STRICT_END (then nothing is added)."""
+    found: list[tuple[int, list]] = []
+    end_limit = len(buf) if strict_end is None else strict_end
+    prev_end = moof.start
+    try:
+        for traf in children(buf, moof):
+            if traf.type != b"traf":
+                continue
+            tfhd = next((c for c in children(buf, traf) if c.type == b"tfhd"), None)
+            if tfhd is None:
+                return False
+            p = tfhd.payload
+            flags = be32(buf, p) & 0xFFFFFF
+            tid = be32(buf, p + 4)
+            q = p + 8
+            _d_idx, d_dur, d_size, d_flags = trex.get(tid, (1, 0, 0, 0))
+            base = moof.start if flags & 0x020000 or not found else prev_end
+            if flags & 0x01:
+                base = be64(buf, q)
+                q += 8
+            if flags & 0x02:
+                q += 4
+            if flags & 0x08:
+                d_dur = be32(buf, q)
+                q += 4
+            if flags & 0x10:
+                d_size = be32(buf, q)
+                q += 4
+            if flags & 0x20:
+                d_flags = be32(buf, q)
+                q += 4
+            samples: list = []
+            pos = base
+            for trun in children(buf, traf):
+                if trun.type != b"trun":
+                    continue
+                r = trun.payload
+                v, tflags = buf[r], be32(buf, r) & 0xFFFFFF
+                count = be32(buf, r + 4)
+                r += 8
+                if tflags & 0x01:
+                    pos = base + struct.unpack_from(">i", buf, r)[0]
+                    r += 4
+                first_flags = None
+                if tflags & 0x04:
+                    first_flags = be32(buf, r)
+                    r += 4
+                per = 4 * bin(tflags & 0xF00).count("1")
+                if r + per * count > trun.end:
+                    return False
+                for i in range(count):
+                    dur, size, sflags, cts = d_dur, d_size, d_flags, 0
+                    if tflags & 0x100:
+                        dur = be32(buf, r)
+                        r += 4
+                    if tflags & 0x200:
+                        size = be32(buf, r)
+                        r += 4
+                    if tflags & 0x400:
+                        sflags = be32(buf, r)
+                        r += 4
+                    elif i == 0 and first_flags is not None:
+                        sflags = first_flags
+                    if tflags & 0x800:
+                        cts = struct.unpack_from(">i" if v else ">I", buf, r)[0]
+                        r += 4
+                    samples.append((pos, size, dur, cts, not sflags & 0x10000))
+                    pos += size
+                prev_end = pos
+            found.append((tid, samples))
+    except (struct.error, IndexError):
+        return False
+    for _tid, samples in found:
+        for pos, size, _d, _c, _k in samples:
+            if pos < 0 or pos + size > end_limit:
+                return False
+    for tid, samples in found:
+        t = tracks.setdefault(tid, FragTrack(tid))
+        if samples:
+            t.runs.append((samples[0][0], len(t.sizes), len(samples)))
+        for pos, size, dur, cts, key in samples:
+            t.offsets.append(pos)
+            t.sizes.append(size)
+            t.durations.append(dur)
+            t.cts.append(cts)
+            t.keys.append(key)
+    return True
+
+
+def fragments_of(buf, boxes: list[Box], moov: Box | None) -> dict[int, FragTrack]:
+    """The samples of every track in the complete movie fragments of a file."""
+    trex = trex_defaults(buf, moov)
+    tracks: dict[int, FragTrack] = {}
+    for b in boxes:
+        if b.type == b"moof" and not b.truncated:
+            parse_moof(buf, b, trex, tracks)
+    return tracks

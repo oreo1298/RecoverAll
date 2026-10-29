@@ -130,3 +130,26 @@ def cut(src: Path, dst: Path, keep: int | float) -> Path:
     n = int(len(data) * keep) if isinstance(keep, float) else int(keep)
     Path(dst).write_bytes(data[:n])
     return Path(dst)
+
+
+def make_other_video(path: Path, vcodec: str | None = "libx264", acodec: str | None = "aac", seconds: float = 1.0,
+                     size: str = "320x240", fps: int = 25, fmt: str | None = None, vargs: tuple = (),
+                     aargs: tuple = (), args: tuple = (), sample_rate: int = 48000, channels: int = 2,
+                     video: str = "testsrc", audio: str = "sine=frequency=1000") -> Path:
+    """Like make_video, with other pictures and sound (VIDEO, AUDIO: lavfi sources without size, rate and
+    duration): a reference recording "from the same camera", with the same settings and different content."""
+    need_ffmpeg(*(c for c in (vcodec, acodec) if c and c not in ("copy",)))
+    cmd: list = []
+    if vcodec:
+        cmd += ["-f", "lavfi", "-i", f"{video}=size={size}:rate={fps}:duration={seconds}"]
+    if acodec:
+        cmd += ["-f", "lavfi", "-i", f"{audio}:sample_rate={sample_rate}:duration={seconds}"]
+    cmd += ["-c:v", vcodec, *vargs] if vcodec else ["-vn"]
+    if vcodec in ("libx264", "libx265"):
+        cmd += ["-pix_fmt", "yuv420p"]
+    cmd += ["-c:a", acodec, "-ac", str(channels), *aargs] if acodec else ["-an"]
+    if fmt:
+        cmd += ["-f", fmt]
+    cmd += [*args, path]
+    ffmpeg(*cmd)
+    return Path(path)
