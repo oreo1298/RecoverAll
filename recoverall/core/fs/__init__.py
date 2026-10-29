@@ -55,7 +55,8 @@ NAMES = {"ntfs": "NTFS", "fat12": "FAT12", "fat16": "FAT16", "fat32": "FAT32", "
          "f2fs": "F2FS", "ufs": "UFS", "ufs1": "UFS1", "ufs2": "UFS2", "zfs_member": "ZFS", "jfs": "JFS",
          "reiserfs": "ReiserFS", "swap": "swap", "crypto_luks": "LUKS", "bitlocker": "BitLocker",
          "lvm2_member": "LVM", "linux_raid_member": "RAID member", "squashfs": "SquashFS", "erofs": "EROFS",
-         "nilfs2": "NILFS2", "minix": "Minix", "carved": "Files found by signature"}
+         "nilfs2": "NILFS2", "minix": "Minix", "carved": "Files found by signature",
+         "thumbnails": "Thumbnails from caches"}
 
 # Order in which readers are tried on a volume nobody identified (cheap probes first).
 PROBE_ORDER = ("ntfs", "exfat", "fat32", "ext4", "xfs", "hfsplus", "iso9660", "btrfs")

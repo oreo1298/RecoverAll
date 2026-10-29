@@ -53,6 +53,7 @@ from .widgets import (
 PAGE = 400
 F_SYSTEM = 1 << 7
 F_CARVED = 1 << 10
+F_THUMBNAIL = 1 << 13
 F_ORPHAN = 1 << 5
 
 CHANCE_HELP = {3: "Its data is all there: it should open fine.",
@@ -322,6 +323,8 @@ class FileModel(QAbstractTableModel):
             if col == 4:
                 if r["is_dir"]:
                     return "Deleted" if r["deleted"] else ""
+                if r["flags"] & F_THUMBNAIL:
+                    return "Thumbnail from a cache"
                 if r["flags"] & F_CARVED:
                     return f"Found by signature · {CHANCE_TEXT.get(r['chance'], '')}"
                 if r["deleted"]:
@@ -530,6 +533,8 @@ class PreviewPanel(Card):
         if row["is_dir"]:
             set_badge(self.badge, "DELETED FOLDER" if row["deleted"] else "FOLDER",
                       "BadgeWarn" if row["deleted"] else "BadgeIdle")
+        elif row["flags"] & F_THUMBNAIL:
+            set_badge(self.badge, "THUMBNAIL", "BadgeInfo")
         elif row["flags"] & F_CARVED:
             set_badge(self.badge, "FOUND BY SIGNATURE", "BadgeInfo")
         elif row["deleted"]:
@@ -554,8 +559,12 @@ class PreviewPanel(Card):
             rows.append(("Created", fmt_when(e["crtime"])))
         what = "the signature search" if e.get("flags", 0) & F_CARVED or vol.get("fstype") == "carved" else \
             f"{fs_name(vol.get('fstype'))} metadata" + (" (no folder known)" if e.get("flags", 0) & F_ORPHAN else "")
-        rows.append(("Found through", what))
         extra = e.get("extra") or {}
+        if e.get("flags", 0) & F_THUMBNAIL:
+            what = extra.get("source") or "a thumbnail cache"
+        rows.append(("Found through", what))
+        if extra.get("original"):
+            rows.append(("Thumbnail of", extra["original"]))
         if extra.get("desc"):
             rows.append(("Type", extra["desc"]))
         info = extra.get("info") or {}
@@ -571,6 +580,9 @@ class PreviewPanel(Card):
         self.grid.set_rows(rows)
         if e.get("is_dir"):
             self.chance.setText("Recovering a folder recovers everything in it, subfolders too.")
+        elif e.get("flags", 0) & F_THUMBNAIL:
+            self.chance.setText("A small copy of a photo that Windows, Linux, macOS or Android kept for the file "
+                                "browser. It comes back whole, even when the photo itself is gone.")
         elif e.get("deleted") or e.get("flags", 0) & F_CARVED:
             self.chance.setText(f"<b>Recovery chance: {CHANCE_TEXT.get(e.get('chance'), '?').lower()}.</b> "
                                 f"{CHANCE_HELP.get(e.get('chance'), '')}")

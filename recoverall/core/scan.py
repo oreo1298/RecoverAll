@@ -24,7 +24,7 @@ import time
 from . import fs as fsmod
 from .blockio import CachedSource, ConcatSource, Source, open_source
 from .errors import Cancelled, RallError
-from .fs.base import F_CARVED, NULL_CONTROL, Control, Entry
+from .fs.base import CHANCE_GOOD, F_CARVED, F_THUMBNAIL, NULL_CONTROL, Control, Entry, read_content, read_head
 from .results import ScanDB
 from .util import fmt_bytes, fmt_rate
 
@@ -583,7 +583,117 @@ class Scanner:
         self.map.mark(runs[0][0], MAP_CATEGORY.get(cat, "o"), min(cf.length, 1))
 
     # ------------------------------------------------------------------ 5. finish
+    # ------------------------------------------------------------------ 4b. thumbnail caches
+    THUMB_LIMIT = 512 * 1024 * 1024          # a bigger cache file isn't read
+    THUMB_TOTAL = 1024 * 1024 * 1024         # thumbnails kept per scan at most
+
+    def thumbnail_pass(self) -> None:
+        """Thumbnails that thumbnail caches kept of photos (Windows thumbcache_*.db and Thumbs.db, Android
+        .thumbdata, Linux desktop thumbnails, macOS QuickLook): the photo may be deleted and overwritten, its
+        thumbnail often isn't. They go into a volume of their own, a folder per cache file."""
+        if self.opts.get("thumbnails") is False:
+            return
+        try:
+            from .media import thumbcache
+        except ImportError:
+            return
+        rows = self.db.conn.execute(
+            "SELECT e.id, e.vol, e.name, e.parent FROM entries e WHERE e.is_dir = 0 AND e.size > 0 AND e.size <= ? AND ("
+            "lower(e.name) LIKE 'thumbcache%.db' OR lower(e.name) IN ('thumbs.db', 'ehthumbs.db', 'ehthumbs_vista.db', "
+            "'index.sqlite') OR lower(e.name) LIKE '.thumbdata%' OR (lower(e.name) LIKE '%.png' AND "
+            "length(e.name) = 36))", (self.THUMB_LIMIT,)).fetchall()
+        vols = {v["id"]: v for v in self.volumes if v.get("origin") not in ("carved", "thumbnails")}
+        regions: dict[int, Source] = {}
+
+        def region(vid: int) -> Source:
+            if vid not in regions:
+                v = vols[vid]
+                regions[vid] = self.src.region(int(v["offset"]), int(v["size"]) or None)
+            return regions[vid]
+
+        def content(eid: int) -> bytes:
+            e = self.db.entry(eid)
+            return b"".join(read_content(region(e["vol"]), e))
+
+        writer = None
+        total = 0
+        caches = 0
+        made: dict[str, set[str]] = {}               # folder key → the names used in it
+        for eid, vid, name, parent in rows:
+            if vid not in vols:
+                continue
+            self.ctl.check()
+            try:
+                path = self.db.path_of(eid)
+                kind = thumbcache.kind_of(path, read_head(region(vid), self.db.entry(eid), 65536))
+                if kind is None or kind in ("android_thumbnail", "quicklook_data"):
+                    continue                 # plain picture files are listed already; QuickLook goes by its index
+                companion = None
+                if kind == "quicklook_index":
+                    sib = self.db.conn.execute("SELECT id FROM entries WHERE parent = ? AND is_dir = 0 AND "
+                                               "lower(name) = 'thumbnails.data'", (parent,)).fetchone()
+                    if sib is None:
+                        continue
+                    companion = content(sib[0])
+                thumbs = thumbcache.extract(content(eid), kind, companion)
+            except (RallError, OSError, KeyError, ValueError) as exc:
+                self.warn(f"The thumbnail cache {name} couldn't be read: {exc}")
+                continue
+            if not thumbs:
+                continue
+            if writer is None:
+                vol = {"number": None, "offset": 0, "size": 0, "fstype": "thumbnails", "label": "",
+                       "origin": "thumbnails", "status": "found", "score": 0, "info": {},
+                       "name": "Thumbnails of deleted photos"}
+                self._register(vol)
+                writer = self.db.writer(vol["id"], base=0)
+                writer.add(Entry(key="__root__", parent=None, name="", is_dir=True))
+                thumb_vol = vol
+            caches += 1
+            if kind == "freedesktop":                # one PNG per photo: one folder for all of them
+                fkey = "cache:freedesktop"
+                if fkey not in made:
+                    writer.add(Entry(key=fkey, parent="__root__", name="Linux desktop thumbnails", is_dir=True))
+                    made[fkey] = set()
+            else:
+                fkey = f"cache:{eid}"
+                writer.add(Entry(key=fkey, parent="__root__", name=f"{name} ({os.path.dirname(path) or '/'})",
+                                 is_dir=True))
+                made[fkey] = set()
+            used = made[fkey]
+            for i, t in enumerate(thumbs):
+                if total + len(t.data) > self.THUMB_TOTAL:
+                    self.warn("Too many thumbnails: the rest of the thumbnail caches weren't read")
+                    break
+                total += len(t.data)
+                fname = t.filename
+                k = 2
+                while fname.lower() in used:
+                    fname = f"{t.name} ({k}).{t.ext}"
+                    k += 1
+                used.add(fname.lower())
+                info = {"width": t.width, "height": t.height} if t.width else {}
+                writer.add(Entry(key=f"t:{eid}:{i}", parent=fkey, name=fname, size=len(t.data), data=t.data,
+                                 mtime=t.mtime, deleted=True, chance=CHANCE_GOOD, flags=F_THUMBNAIL,
+                                 extra={"desc": "Thumbnail", "original": t.original_path,
+                                        "source": f"{thumbcache.KINDS.get(kind, kind)}: {path}", "info": info}))
+            if total > self.THUMB_TOTAL:
+                break
+        if writer is not None:
+            writer.finish()
+            vol = self.db.volume(thumb_vol["id"])
+            thumb_vol["files"] = vol["files"]
+            self.db.update_volume(thumb_vol["id"], state="done")
+            self.ctl.log(f"{vol['files']:,} thumbnails found in {caches} thumbnail cache"
+                         f"{'s' if caches != 1 else ''}".replace(",", " "))
+
     def finish(self) -> dict:
+        try:
+            self.thumbnail_pass()
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - an extra: never fail a scan for it
+            log.warning("thumbnail caches: %s", exc, exc_info=True)
         if self.carved_writer is not None:
             self.carved_writer.finish()
             if any(v["origin"] != "carved" and v.get("files") for v in self.volumes):

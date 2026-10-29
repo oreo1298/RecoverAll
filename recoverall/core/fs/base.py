@@ -46,6 +46,7 @@ F_RESIDENT = 1 << 9       # the content lives in the metadata itself (data)
 F_CARVED = 1 << 10        # found by its signature, not through a filesystem
 F_PARTIAL = 1 << 11       # only part of the content could be located
 F_DIR_RECOVERED = 1 << 12  # a folder rebuilt from orphaned entries
+F_THUMBNAIL = 1 << 13      # a thumbnail kept by a thumbnail cache (the photo itself may be gone)
 
 
 @dataclass(slots=True)

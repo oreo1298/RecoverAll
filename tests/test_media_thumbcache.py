@@ -298,3 +298,42 @@ def test_damaged_caches_never_raise(pics, tmp_path):
             assert isinstance(got, list) and all(isinstance(t.data, bytes) for t in got)
             kind_of("thumbs.db", bytes(bad[:64]))
     assert extract(b"", "thumbsdb") == [] and extract(b"CMMM", "thumbcache") == [] and extract(b"x", "nope") == []
+
+
+def test_thumbnails_appear_in_scan_results(pics, tmp_path):
+    """A scan finds the thumbnail caches on a disk and lists their thumbnails in a volume of their own, a folder
+    per cache; Linux thumbnails carry the original file's name."""
+    from imagekit import MiB, mkfs, mtools_copy, need
+
+    from recoverall.core.api import LocalAPI, wait_job
+    need("mkfs.fat", "mcopy")
+    img = mkfs(tmp_path / "disk.img", "fat32", size=64 * MiB, label="PC")
+    files = {
+        "Users/ann/AppData/Local/Microsoft/Windows/Explorer/thumbcache_256.db":
+            thumbcache_db([("6a1f8e2c9d3b4a5f", pics["a"]), ("77aa0b1c2d3e4f50", pics["c"])]),
+        "home/ann/.cache/thumbnails/normal/0123456789abcdef0123456789abcdef.png":
+            freedesktop(pics["png"], "file:///home/ann/Pictures/IMG_0042.JPG", 1_690_000_000),
+        "Pictures/keep.txt": b"not a cache",
+    }
+    mtools_copy(img, files, tmp_path)
+    api = LocalAPI()
+    try:
+        job = api.start_scan(source=str(img), options={"mode": "quick"})
+        scan = wait_job(api, job["id"], 120)["result"]["scan"]
+        vols = [v for v in api.scan_info(scan=scan)["volumes"] if v["fstype"] == "thumbnails"]
+        assert len(vols) == 1 and vols[0]["name"] == "Thumbnails of deleted photos" and vols[0]["files"] == 3
+        folders = {r["name"]: r for r in api.scan_children(scan=scan, parent=vols[0]["root_id"])["rows"]}
+        win = next(r for n, r in folders.items() if n.startswith("thumbcache_256.db ("))
+        assert "Explorer" in win["name"] and "Linux desktop thumbnails" in folders
+        rows = api.scan_children(scan=scan, parent=folders["Linux desktop thumbnails"]["id"])["rows"]
+        assert [r["name"] for r in rows] == ["IMG_0042.png"]
+        e = api.scan_entry(scan=scan, entry=rows[0]["id"])
+        assert e["extra"]["original"] == "/home/ann/Pictures/IMG_0042.JPG"
+        pics_found = api.scan_children(scan=scan, parent=win["id"])["rows"]
+        out = tmp_path / "out"
+        job = api.start_recover(scan=scan, entries=[r["id"] for r in pics_found], dest=str(out), options={})
+        assert wait_job(api, job["id"], 60)["state"] == "done"
+        got = sorted(p.read_bytes() for p in out.rglob("*.jpg"))
+        assert got == sorted([pics["a"], pics["c"]])
+    finally:
+        api.close()
