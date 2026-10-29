@@ -85,7 +85,13 @@ EXTENSIONS = {
 }
 # the repair handlers that live in recoverall.core.media, loaded when first needed: kind → (module, function)
 MEDIA_HANDLERS = {"mkv": ("mkv", "plan_mkv"), "ts": ("mpegts", "plan_mpegts"), "ps": ("mpegps", "plan_mpegps"),
-                  "asf": ("asf", "plan_asf"), "flv": ("flv", "plan_flv")}
+                  "asf": ("asf", "plan_asf"), "flv": ("flv", "plan_flv"), "raw": ("rawpreview", "plan_raw")}
+# camera RAW photos (and HEIC): a damaged one is "repaired" into the full-size preview it carries
+RAW_TYPES = frozenset({"cr2", "cr3", "crw", "nef", "nrw", "arw", "sr2", "srf", "orf", "rw2", "rwl", "pef", "dng",
+                       "srw", "3fr", "erf", "kdc", "dcr", "mos", "iiq", "raf", "mef", "mrw", "x3f", "heic", "heif"})
+EXTENSIONS.update({t: t for t in RAW_TYPES})
+# ISO media brands that are pictures (Canon CR3, HEIF/HEIC, AVIF), not movies
+_PHOTO_BRANDS = (b"crx ", b"heic", b"heix", b"mif1", b"msf1", b"avif", b"avis", b"hevc", b"hevx")
 # the kinds whose repair can use a reference file of the same camera or program
 REFERENCE_KINDS = {"jpg", "mp4", "mkv", "ts", "ps", "asf", "flv"}
 ZIP_TYPES = {"zip", "docx", "docm", "dotx", "xlsx", "xlsm", "xltx", "pptx", "pptm", "potx", "ppsx", "vsdx",
@@ -110,7 +116,10 @@ NAMES = {"jpg": "JPEG photo", "png": "PNG image", "gif": "GIF image", "zip": "ZI
          "epub": "EPUB book", "jar": "Java archive", "apk": "Android package", "mkv": "Matroska video",
          "webm": "WebM video", "ts": "MPEG transport stream", "m2ts": "AVCHD / Blu-ray video", "mpg": "MPEG video",
          "vob": "DVD video", "wmv": "Windows Media video", "wma": "Windows Media audio", "asf": "Windows Media file",
-         "flv": "Flash video"}
+         "flv": "Flash video", "heic": "HEIC photo", "heif": "HEIF photo",
+         **{t: f"{t.upper()} camera RAW photo" for t in ("cr2", "cr3", "crw", "nef", "nrw", "arw", "sr2", "srf", "orf",
+                                                      "rw2", "rwl", "pef", "dng", "srw", "3fr", "erf", "kdc", "dcr",
+                                                      "mos", "iiq", "raf", "mef", "mrw", "x3f")}}
 
 
 @dataclass
@@ -194,6 +203,8 @@ def _riff_type(head: bytes) -> str | None:
 
 
 def _mp4_like(head: bytes) -> str | None:
+    if head[4:8] == b"ftyp" and head[8:12] in _PHOTO_BRANDS:
+        return None
     if len(head) >= 12 and head[4:8] in (b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip"):
         return "mov" if head[4:8] == b"ftyp" and head[8:12] == b"qt  " else "mp4"
     return None
@@ -224,7 +235,7 @@ def detect(buf, path: str | Path = "") -> str:
     for magic, t in _MAGIC:
         if head.startswith(magic):
             return _zip_subtype(buf, ext) if t == "zip" else t
-    t = _riff_type(head) or _mp4_like(head) or _video_type(buf, head, ext)
+    t = _raw_type(head, ext) or _riff_type(head) or _mp4_like(head) or _video_type(buf, head, ext)
     if t:
         return t
     first = _mp3_frame_at(buf, 0)
@@ -242,6 +253,26 @@ def detect(buf, path: str | Path = "") -> str:
                 return _zip_subtype(buf, ext) if t == "zip" else t
         return _riff_type(found) or ""
     return ""
+
+
+def _raw_type(head: bytes, ext: str) -> str | None:
+    """A camera RAW photo or a HEIF/HEIC picture, by its first bytes (a plain TIFF isn't one)."""
+    if head[:16] == b"FUJIFILMCCD-RAW ":
+        return "raf"
+    if head[4:8] == b"ftyp" and head[8:12] == b"crx ":
+        return "cr3"
+    if head[4:8] == b"ftyp" and head[8:12] in _PHOTO_BRANDS:
+        return ext if ext in ("heic", "heif") else "heic"
+    if head[:4] in (b"II*\x00", b"MM\x00*", b"IIRO", b"IIRS", b"MMOR", b"IIU\x00"):
+        if ext in RAW_TYPES:
+            return ext
+        if head[8:10] == b"CR":
+            return "cr2"
+        if head[:4] == b"IIU\x00":
+            return "rw2"
+        if head[:4] in (b"IIRO", b"IIRS", b"MMOR"):
+            return "orf"
+    return None
 
 
 def _video_type(buf, head: bytes, ext: str) -> str | None:
@@ -281,6 +312,8 @@ def _kind(t: str) -> str:
         return "ps"
     if t in ("wmv", "wma", "asf"):
         return "asf"
+    if t in RAW_TYPES:
+        return "raw"
     return t
 
 
@@ -2371,7 +2404,7 @@ _HANDLERS = {"jpg": _jpeg, "png": _png, "gif": _gif, "zip": _zip, "pdf": _pdf, "
              **{kind: _media_handler(mod, fn) for kind, (mod, fn) in MEDIA_HANDLERS.items()}}
 SUPPORTED_TYPES = sorted({"jpg", "png", "gif", "pdf", "wav", "avi", "webp", "aiff", "gz", "bz2", "xz", "mp3",
                           "mp4", "mov", "mkv", "webm", "ts", "m2ts", "mpg", "vob", "wmv", "wma", "asf", "flv"}
-                         | ZIP_TYPES)
+                         | ZIP_TYPES | RAW_TYPES)
 
 
 @contextlib.contextmanager
@@ -2437,6 +2470,11 @@ def repair(path: str | Path, out_path: str | Path, reference: str | Path | None 
     try:
         with _mapped(path) as buf:
             plan = _plan(buf, path, reference, data_offset, ctl)
+            if plan.info.get("output") == "preview" and "(repaired)" in out_path.name:
+                # the copy is the picture's preview, not the file: "IMG_1234 (preview).jpg" instead of the
+                # usual name (a name the caller chose is kept)
+                out_path = _free_name(out_path.with_name(preview_name(path, plan.info.get("output_ext") or "jpg")))
+            tmp = out_path.with_name(f".{out_path.name}.part")
             result = {"ok": False, "type": plan.type, "actions_done": [], "out": None, "problems": plan.problems,
                       "info": plan.info}
             if not plan.problems:
@@ -2484,6 +2522,22 @@ def _write_pieces(buf, pieces: list, out: BinaryIO, ctl: Control) -> None:
         elif p:
             out.write(p)
             done += len(p)
+
+
+def preview_name(path: str | Path, ext: str = "jpg") -> str:
+    """The name of a photo's saved preview: "IMG_1234.CR2" → "IMG_1234 (preview).jpg"."""
+    stem = Path(path).stem or Path(path).name
+    return safe_filename(f"{stem} (preview).{ext}")
+
+
+def _free_name(p: Path) -> Path:
+    """P, or "name 2.ext", "name 3.ext"... when P exists."""
+    k = 2
+    out = p
+    while out.exists():
+        out = p.with_name(f"{p.stem} {k}{p.suffix}")
+        k += 1
+    return out
 
 
 def output_name(path: str | Path, kind: str | None = None) -> str:

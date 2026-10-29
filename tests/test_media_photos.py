@@ -528,3 +528,33 @@ def test_jpeg_previews_of_a_photo(photos):
     assert [p.width for p in found] == [160] and found[0].source == "EXIF thumbnail"
     assert photo[found[0].offset:found[0].end] == thumb
     assert rawpreview.best_preview(io.BytesIO(photo).getvalue()).valid
+
+
+def test_file_repair_routes_raw_photos_to_their_preview(photos, tmp_path):
+    """Through the file repair: RAW photos and HEIC are recognised (CR3 and HEIC are ISO media files but no
+    videos), a damaged one's repaired copy is its preview, named "<name> (preview).jpg"."""
+    from pathlib import Path
+
+    from recoverall.core import filerepair as F
+    full, thumb = photos["big"], photos["thumb"]
+    cases = {"CR2": cr2(full, thumb), "NEF": nef(full, thumb), "CR3": cr3(full, photos["base"], thumb),
+             "RAF": raf(full), "DNG": dng(full, thumb)}
+    out = tmp_path / "out"
+    paths = []
+    for ext, data in cases.items():
+        p = tmp_path / f"IMG_0001.{ext}"
+        p.write_bytes(data[:len(data) - 150_000])
+        paths.append(p)
+        if ext in ("CR2", "CR3", "RAF"):                     # their content says so (NEF/DNG are plain TIFF)
+            assert F.detect(p.read_bytes(), tmp_path / "renamed.bin") == ext.lower(), ext
+        assert F.detect(p.read_bytes(), p) == ext.lower()
+        a = F.analyze(p)
+        assert a["problems"] and a["repairable"] and a["name"].endswith("RAW photo"), (ext, a)
+    heic = box(b"ftyp", b"heic" + bytes(4) + b"mif1heic") + box(b"meta", bytes(64))
+    assert F.detect(heic, "x.heic") == "heic" and F._kind("heic") == "raw"
+    results = F.repair_many(paths, out)
+    names = sorted(Path(r["out"]).name for r in results if r["out"])
+    assert names == ["IMG_0001 (preview) 2.jpg", "IMG_0001 (preview) 3.jpg", "IMG_0001 (preview) 4.jpg",
+                     "IMG_0001 (preview) 5.jpg", "IMG_0001 (preview).jpg"]
+    for r in results:
+        assert Path(r["out"]).read_bytes() == full
