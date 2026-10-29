@@ -304,6 +304,39 @@ def test_loop_device_for_image(tmp_path, ctl):
     assert out.strip() == ""             # detached again
 
 
+@pytest.mark.root
+def test_loop_detach_waits_for_the_last_user(tmp_path):
+    """While something has a loop device open (udev probes every new one), losetup -d succeeds but the kernel
+    only detaches it at the last close: detach_loop waits for that, and gives up when it never comes."""
+    import threading
+
+    from recoverall.core.util import detach_loop
+    if shutil.which("losetup") is None and not os.path.exists("/usr/sbin/losetup"):
+        pytest.skip("losetup is not installed")
+    img = tmp_path / "l.img"
+    img.write_bytes(bytes(MiB))
+
+    def attach():
+        r = subprocess.run(["losetup", "-r", "-f", "--show", str(img)], capture_output=True, text=True)
+        if r.returncode:
+            pytest.skip(f"no loop devices here: {r.stderr.strip()}")
+        return r.stdout.strip()
+
+    def listed():
+        return subprocess.run(["losetup", "-j", str(img)], capture_output=True, text=True).stdout.strip()
+    loop = attach()
+    fd = os.open(loop, os.O_RDONLY)
+    threading.Timer(0.3, os.close, (fd,)).start()
+    assert detach_loop(loop) and listed() == ""
+    loop = attach()
+    fd = os.open(loop, os.O_RDONLY)
+    try:
+        assert not detach_loop(loop, timeout=0.5)
+    finally:
+        os.close(fd)
+    assert detach_loop(loop) and listed() == ""
+
+
 def test_cancel_and_live_log(tmp_path, ctl):
     img = mkfs(tmp_path / "ext4.img", "ext4", size=32 * MiB)
 

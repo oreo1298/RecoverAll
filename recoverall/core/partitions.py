@@ -31,7 +31,7 @@ import zlib
 from .blockio import FileSource, Source
 from .errors import NotPermitted, RallError
 from .fsdetect import guid_le, identify_at
-from .util import MiB, TiB, run
+from .util import MiB, TiB, detach_loop, run
 
 log = logging.getLogger(__name__)
 
@@ -734,7 +734,7 @@ def write_table(device: str, plan: dict, backup_dir: str) -> dict:
         rr = run(cmd + [target], timeout=120, input_text=plan["script"])
     finally:
         if loop:
-            run(["losetup", "-d", loop], timeout=60)
+            detach_loop(loop, timeout=10)
     if not rr.ok:
         raise RallError(f"sfdisk couldn't write the table: {rr.error_text()} (nothing to undo if it wrote nothing; "
                         f"the old sectors are saved in {backup})")

@@ -22,7 +22,7 @@ from .config import SYSTEM_STATE_DIR, backups_dir, raid_dir, scans_dir, user_dat
 from .errors import NotPermitted, RallError, ScanError
 from .jobs import Job, JobControl, JobRunner
 from .results import ScanDB
-from .util import fmt_bytes, give_to_caller, run, safe_name, which
+from .util import detach_loop, fmt_bytes, give_to_caller, run, safe_name, which
 
 log = logging.getLogger(__name__)
 
@@ -568,7 +568,7 @@ class LocalAPI:
         rr = run([*cmd, dev, name], timeout=120, input_text=passphrase)
         if not rr.ok:
             if loop:
-                run(["losetup", "-d", loop], timeout=30)
+                detach_loop(loop)
             raise RallError("Wrong passphrase, or not a LUKS/BitLocker volume: " + rr.error_text(200))
         mapped = f"/dev/mapper/{name}"
         self._unlocked[mapped] = {"name": name, "loop": loop, "source": source}
@@ -580,7 +580,7 @@ class LocalAPI:
             return False
         run(["cryptsetup", "close", info["name"]], timeout=60)
         if info.get("loop"):
-            run(["losetup", "-d", info["loop"]], timeout=30)
+            detach_loop(info["loop"], timeout=10)
         return True
 
     def unlocked(self) -> list[dict]:
@@ -787,7 +787,7 @@ def _repair(job: Job, path: str, action: str, offset: int, size, fstype: str, op
                                   block_size=opts.get("block_size"))
         finally:
             if loop:
-                run(["losetup", "-d", loop], timeout=30)
+                detach_loop(loop, timeout=10)
         job.update(message=res.get("summary") or "Done", force=True)
         if not res.get("ok") and res.get("exit_code") not in (0, 1):
             job.warn(res.get("summary") or "The tool reported a problem")

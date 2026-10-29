@@ -32,13 +32,12 @@ import re
 import shlex
 import stat
 import struct
-import time
 from collections import deque
 from pathlib import Path
 
 from .errors import Cancelled, NotPermitted, NotSupported, RallError, ToolMissing, UnsafeOperation
 from .fs.base import NULL_CONTROL, Control
-from .util import read_text, run, stream, which
+from .util import detach_loop, read_text, run, stream, which
 
 RISKS = ("safe", "normal", "risky")
 RISK_NAMES = {"safe": "Read-only", "normal": "Repair", "risky": "Last resort"}
@@ -558,11 +557,7 @@ def _loop_for(path: str, readonly: bool, ctl: Control):
     try:
         yield loop
     finally:
-        for _ in range(10):
-            dr = run(["losetup", "--detach", loop], timeout=30)
-            if dr.ok or "No such device" in dr.stderr:
-                break
-            time.sleep(0.3)        # still busy for a moment after the program exits
+        detach_loop(loop, timeout=10)
 
 
 # ---------------------------------------------------------------------- running an action

@@ -38,7 +38,7 @@ from typing import Iterator
 
 from ..blockio import Source
 from ..errors import FormatError, NotSupported, ToolMissing
-from ..util import run, which
+from ..util import detach_loop, run, which
 from .base import (
     CHANCE_FAIR,
     CHANCE_GOOD,
@@ -186,9 +186,7 @@ class _Device:
 
     def close(self) -> None:
         if self.loop:
-            for _ in range(5):
-                if run(["losetup", "-d", self.loop], timeout=30).ok:
-                    break
+            detach_loop(self.loop)
             self.loop = None
         self.path = None
 

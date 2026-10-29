@@ -82,6 +82,26 @@ def run(cmd: list[str], timeout: float = 60.0, input_text: str | None = None,
     return RunResult(proc.returncode, proc.stdout, proc.stderr)
 
 
+def detach_loop(loop: str, timeout: float = 5.0) -> bool:
+    """Detach the loop device LOOP and wait until it is gone. While something still has it open (udev probes
+    every new loop device; a tool that used it may still be exiting) losetup -d either fails, or succeeds and
+    the kernel only detaches it at the last close, so it stays attached for a moment."""
+    backing = f"/sys/block/{os.path.basename(loop)}/loop/backing_file"
+    end = time.monotonic() + timeout
+    detached = False
+    while True:
+        if not detached:
+            rr = run(["losetup", "-d", loop], timeout=30)
+            if rr.missing:
+                return False
+            detached = rr.ok or "No such device" in rr.stderr
+        if detached and not os.path.exists(backing):
+            return True
+        if time.monotonic() > end:
+            return False
+        time.sleep(0.1)
+
+
 def stream(cmd: list[str], on_line: Callable[[str], None] | None = None,
            cancelled: Callable[[], bool] | None = None, input_text: str | None = None,
            env: dict | None = None, timeout: float | None = None, kill_grace: float = 15.0) -> RunResult:
