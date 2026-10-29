@@ -557,6 +557,13 @@ class Scanner:
             w.add(Entry(key=catkey, parent="__root__", name=CATEGORY_NAMES.get(cat, cat.title()), is_dir=True))
             self.carved_folders.add(catkey)
         typekey = f"type:{cat}:{cf.ext}"
+        if cf.info and cf.info.get("needs_index"):
+            # recordings that were never finished: not playable until repaired with a reference video
+            typekey += ":unfinished"
+            if typekey not in self.carved_folders:
+                w.add(Entry(key=typekey, parent=catkey, name=f"Unfinished recordings (.{cf.ext}) — repair them with "
+                            "a reference video", is_dir=True))
+                self.carved_folders.add(typekey)
         if typekey not in self.carved_folders:
             w.add(Entry(key=typekey, parent=catkey, name=f"{(cf.description or cf.ext.upper())} (.{cf.ext})",
                         is_dir=True))
