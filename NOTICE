@@ -19,6 +19,15 @@ documentation of the EWF (E01) format, and the file formats' own
 specifications (JPEG/EXIF, PNG, ISO base media, RIFF, ZIP, PDF and the others listed by
 `recoverctl formats`).
 
+Data from other projects
+------------------------
+
+* recoverall/core/media/aac_tables.py holds the AAC Huffman codebooks and scale factor band tables of
+  ISO/IEC 14496-3, converted to Python tables (by tools/gen_aac_tables.py) from aacenc/src/aac_rom.c of the
+  VisualOn AAC encoder (vo-aacenc, https://github.com/mstorsjo/vo-aacenc). Its NOTICE reads: "These files are
+  Copyright 2003-2010 VisualOn, but released under the Apache2 License." Licensed under the Apache License,
+  Version 2.0: see LICENSES/Apache-2.0.txt. Modified: converted from C arrays to Python tables.
+
 Tools it runs (not bundled)
 ---------------------------
 

@@ -67,5 +67,6 @@ package() {
   install -dm755 "$pkgdir/var/lib/recoverall"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  install -Dm644 LICENSES/Apache-2.0.txt "$pkgdir/usr/share/licenses/$pkgname/Apache-2.0.txt"
   install -Dm644 README.md docs/HOW-IT-WORKS.md -t "$pkgdir/usr/share/doc/$pkgname/"
 }

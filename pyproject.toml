@@ -9,7 +9,7 @@ description = "Data recovery for Linux: deleted files on every popular filesyste
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-license-files = ["LICENSE", "NOTICE"]
+license-files = ["LICENSE", "NOTICE", "LICENSES/Apache-2.0.txt"]
 authors = [{ name = "RecoverAll contributors" }]
 keywords = ["data recovery", "undelete", "file recovery", "partition recovery", "photo recovery", "file carving",
             "NTFS", "FAT32", "exFAT", "ext4", "XFS", "RAID", "R-Studio alternative", "TestDisk", "PhotoRec"]
