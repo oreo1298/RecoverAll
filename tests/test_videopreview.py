@@ -73,3 +73,30 @@ def test_ffmpeg_runs_unprivileged(monkeypatch):
     assert vp._unprivileged()["user"] == 65534
     # garbage never becomes a picture
     assert vp.ffmpeg_frame(b"\x00" * 5000, "h264") is None
+
+
+def test_unfinished_recording_found_by_signature(tmp_path):
+    """A deleted recording whose index was never written is found by the signature search, sorted under
+    "Unfinished recordings", and its preview says what to do."""
+    need("mkfs.fat", "mcopy", "mdel")
+    from imagekit import mtools_delete
+    clip = make_video(tmp_path / "a.mp4", "libx264", "aac", seconds=3)
+    unfinished = cut(clip, tmp_path / "u.mp4", 0.7).read_bytes()
+    img = mkfs(tmp_path / "card.img", "fat32", size=64 * MiB, label="CAM")
+    mtools_copy(img, {"DCIM/MVI_0042.MP4": unfinished}, tmp_path)
+    mtools_delete(img, "DCIM/MVI_0042.MP4")
+    api = LocalAPI()
+    try:
+        job = api.start_scan(source=str(img), options={"mode": "carve", "free_only": True, "formats": ["video"]})
+        scan = wait_job(api, job["id"], 120)["result"]["scan"]
+        rows = api.scan_search(scan=scan, filters={"cats": ["video"]}, limit=10)["rows"]
+        assert len(rows) == 1
+        e = api.scan_entry(scan=scan, entry=rows[0]["id"])
+        assert e["extra"]["info"]["needs_index"] and e["extra"]["info"]["video"] == "h264"
+        folder = api.scan_entry(scan=scan, entry=e["parent"])
+        assert folder["name"].startswith("Unfinished recordings (.mp4)")
+        assert e["size"] >= len(unfinished) * 0.9
+        p = api.preview(scan=scan, entry=rows[0]["id"])
+        assert p["kind"] == "video" and "index is missing" in p["note"]
+    finally:
+        api.close()
