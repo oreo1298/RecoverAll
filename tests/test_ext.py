@@ -276,8 +276,17 @@ def test_ext2_1k_blocks_deleted_by_debugfs(tmp_path):
     src, rd, ents = read_all(img)
     assert rd.fstype == "ext2" and rd.bs == 1024
     check_live(src, ents, tree)
-    cmds = []
+    # a name that is the first entry of a folder block loses its inode number when deleted (the folder's hash
+    # seed is random, so where names land changes): delete names that keep it; that case has its own test
+    firsts = first_in_block(img, "many", 1024)
+    delete = []
     for rel in DELETE_EXT2:
+        if rel.startswith("many/") and rel[5:] in firsts:
+            rel = next(f"many/{n}" for n in sorted(tree_names(tree, "many")) if n not in firsts
+                       and f"many/{n}" not in DELETE_EXT2)
+        delete.append(rel)
+    cmds = []
+    for rel in delete:
         if rel == "a":
             cmds += ["rm /a/b/c/deep.txt", "rmdir /a/b/c", "rm /a/b/mid.bin", "rmdir /a/b", "rm /a/top.txt",
                      "rmdir /a"]
@@ -287,10 +296,49 @@ def test_ext2_1k_blocks_deleted_by_debugfs(tmp_path):
     script.write_text("\n".join(cmds) + "\n")
     sh("debugfs", "-w", "-f", script, img)
     src, rd, ents = read_all(img)
-    check_deleted(src, ents, tree, journal=False, delete=DELETE_EXT2)
+    check_deleted(src, ents, tree, journal=False, delete=delete)
     gone = {rel for rel in list(tree["files"]) + ["slow_link", "a", "a/b", "a/b/c"]
-            if any(rel == d or rel.startswith(d + "/") for d in DELETE_EXT2)}
+            if any(rel == d or rel.startswith(d + "/") for d in delete)}
     check_with_tsk(img, ents, deleted=gone)
+
+
+def first_in_block(img: Path, folder: str, bs: int) -> set[str]:
+    """The names that are the first entry of a folder block (the folder's bytes through debugfs)."""
+    env = dict(os.environ, PATH=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")
+    raw = subprocess.run(["debugfs", "-R", f"cat /{folder}", str(img)], capture_output=True, env=env).stdout
+    out = set()
+    for blk in range(1, len(raw) // bs):           # block 0 of an htree folder is its index
+        b = raw[blk * bs:(blk + 1) * bs]
+        inode, _rec, nlen = struct.unpack_from("<IHB", b, 0)
+        if inode and nlen:
+            out.add(b[8:8 + nlen].decode("utf-8", "replace"))
+    return out
+
+
+def tree_names(tree: dict, folder: str) -> list[str]:
+    return [rel[len(folder) + 1:] for rel in tree["files"] if rel.startswith(folder + "/")]
+
+
+@pytest.mark.root
+def test_ext2_name_first_in_block_goes_to_lost_files(tmp_path):
+    """Deleting the first entry of a folder block can't merge it into the entry before: ext2/3/4 zero its inode
+    number instead, so nothing links that name to its data any more. The file still comes back, whole, as
+    "inode N" under Lost files; a name deleted from the middle of a block keeps its name."""
+    need("mkfs.ext2", "debugfs")
+    img, _mnt, tree = build(tmp_path, "ext2", extra=["-b", "1024"], many=60, big=1 * MiB)
+    firsts = first_in_block(img, "many", 1024) & set(tree_names(tree, "many"))
+    assert firsts, "an htree folder of 60 names has several leaf blocks"
+    first = sorted(firsts)[0]
+    middle = next(n for n in sorted(tree_names(tree, "many")) if n not in firsts)
+    script = tmp_path / "cmds"
+    script.write_text(f'rm "/many/{first}"\nrm "/many/{middle}"\n')
+    sh("debugfs", "-w", "-f", script, img)
+    src, _rd, ents = read_all(img)
+    p = paths(ents)
+    assert (f"many/{middle}", True) in p
+    assert (f"many/{first}", True) not in p
+    lost = {content(src, e) for (path, dele), e in p.items() if dele and path.startswith("<lost>/inode ")}
+    assert tree["files"][f"many/{first}"] in lost
 
 
 @pytest.mark.root
