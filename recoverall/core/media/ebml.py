@@ -26,7 +26,8 @@ UNKNOWN_SIZE = b"\x01\xff\xff\xff\xff\xff\xff\xff"
 
 def read_vint(buf, pos: int, end: int, max_len: int = 8) -> tuple[int, int, bool] | None:
     """The variable-length integer at POS: (value without the marker bit, length, every value bit set)."""
-    if pos >= end:
+    end = min(end, len(buf))                # an element may claim to run past the data
+    if pos >= end or pos < 0:
         return None
     first = buf[pos]
     if first == 0:
@@ -42,7 +43,8 @@ def read_vint(buf, pos: int, end: int, max_len: int = 8) -> tuple[int, int, bool
 
 def read_id(buf, pos: int, end: int) -> tuple[int, int] | None:
     """The element id at POS (marker bit kept) and its length, or None."""
-    if pos >= end:
+    end = min(end, len(buf))
+    if pos >= end or pos < 0:
         return None
     first = buf[pos]
     if first < 0x10 or first == 0xFF:
@@ -97,6 +99,7 @@ def children(buf, start: int, end: int, limit: int = 10_000_000) -> Iterator[Ele
     """The elements in [START, END) one after the other. Stops at the first one that doesn't parse, runs past
     END or has an unknown size (that one is still yielded)."""
     pos = start
+    end = min(end, len(buf))
     for _ in range(limit):
         if pos >= end:
             return

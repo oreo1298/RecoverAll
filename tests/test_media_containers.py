@@ -5,6 +5,7 @@ overwritten with random bytes or zeros, the start lost)."""
 import random
 import struct
 import subprocess
+import zlib
 from pathlib import Path
 
 import pytest
@@ -163,7 +164,7 @@ def test_fuzz_never_raises(tmp_path_factory, family):
     src = clip(tmp_path_factory, family, 3.0)
     plan_fn = FAMILIES[family][1]
     base = src.read_bytes()[:48 * 1024]
-    rnd = random.Random(hash(family) & 0xFFFF)
+    rnd = random.Random(zlib.crc32(family.encode()))        # the same corruptions every run (hash() isn't)
     for i in range(200):
         data = bytearray(base)
         kind = i % 5
@@ -495,3 +496,18 @@ def test_damaged_time_stamps_dont_hide_the_rest(tmp_path_factory, tmp_path):
     assert any("damaged stretch" in p for p in plan.problems)
     assert decode_check(out)[0]
     assert len(probe_packets(out, "a")) >= len(probe_packets(src, "a")) - 2
+
+
+def test_ebml_elements_past_the_data():
+    """An element that claims to run past the data (its file cut short or damaged) never makes the readers
+    read past the buffer (it once did, in the duration-tag patching of a repair with a reference)."""
+    tags = bytes.fromhex("1254c367") + bytes.fromhex("01000000000000ff")      # Tags, size 255
+    tag = bytes.fromhex("7373") + bytes.fromhex("8f") + bytes.fromhex("63c0") + bytes.fromhex("8a")
+    buf = tags + tag
+    el = ebml.element_at(buf, 0, len(buf))
+    assert el is not None and el.end > len(buf)
+    assert [c.id for c in ebml.children(buf, el.data, el.end)] == [0x7373]
+    inner = next(ebml.children(buf, el.data, el.end))
+    assert list(ebml.children(buf, inner.data, inner.end))[0].id == 0x63C0
+    assert ebml.read_id(buf, len(buf), len(buf) + 100) is None
+    assert ebml.read_vint(buf, len(buf) + 5, len(buf) + 100) is None
