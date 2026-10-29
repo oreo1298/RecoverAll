@@ -4,17 +4,50 @@ and RealMedia.
 
 Lengths are exact for every format here: the top-level boxes / chunks / elements / objects / tags are walked
 (or the recorded size is used), and the MPEG streams are followed pack by pack or packet by packet until the
-start codes or sync bytes stop. A movie needs its index to play: an MP4/MOV is only accepted when its movie
-box (moov) is there, before or after the media data. A video cut short (the rest of it overwritten) is kept
-with a poor chance. Phones and cameras record when a video was shot: it names the file.
+start codes or sync bytes stop. A video cut short (the rest of it overwritten) is kept with a poor chance.
+Phones and cameras record when a video was shot: it names the file.
+
+An MP4/MOV is checked against its index (the movie box, moov), which says where every frame is and how big
+it is (media/mp4carve.py does the work):
+
+* Nine frames are looked at where the index puts them (and, when the movie box comes first, the start of the
+  frames of the last chunk of sound). When they are all there, the file is in one piece, as found (this is
+  what nearly every video gets, and it costs a few small reads).
+* When the first frames are there but later ones aren't, the file was fragmented on the disk (big recordings
+  on FAT32/exFAT/NTFS often are): its pieces are put back together by searching ahead for the frames that are
+  missing (fair chance, the pieces become the file's runs). A movie box at the end of a fragmented file is
+  searched for too: such a file shows up as media data with no movie box after it.
+* Media data without any movie box, where the frames are valid video (H.264/H.265 NAL units, ProRes, Motion
+  JPEG), is a recording that was never finished (the camera lost power, the card was pulled): the media data is
+  measured and the file is kept with a poor chance, marked ``needs_index`` for the repair, which rebuilds the
+  index from a reference video of the same camera.
+* A movie box on its own (its frames would lie inside it: the end of a file whose start is elsewhere) is not a
+  file: it is left for the media data to find (above).
 """
 
 from __future__ import annotations
 
+import logging
 import struct
 
+from ..media import mp4carve
 from .base import CHANCE_FAIR, CHANCE_GOOD, CHANCE_POOR, Format, GiB, Hit, KiB, MiB, Reader
-from .common import MKV_EPOCH, bmff_movie, ebml_uint, iter_ebml, memo, parse_asf, plausible_time, time_name
+from .common import (
+    MKV_EPOCH,
+    BytesReader,
+    bmff_kind,
+    bmff_movie,
+    ebml_uint,
+    iter_ebml,
+    memo,
+    moov_info,
+    parse_asf,
+    plausible_time,
+    time_name,
+)
+from .common import Box as _Box
+
+log = logging.getLogger(__name__)
 
 
 def _dated(t: float | None) -> tuple[str | None, float | None]:
@@ -24,20 +57,179 @@ def _dated(t: float | None) -> tuple[str | None, float | None]:
 
 
 # ---------------------------------------------------------------------- MP4 / MOV
-def parse_mp4(r: Reader) -> Hit | None:
-    m = bmff_movie(r)
-    if m is None or m["audio_only"]:
-        return None
-    b, mi = m["walk"], m["moov"]
+NEEDS_INDEX_NOTE = ("The recording was not finished: its index is missing. Repair it with a reference video "
+                    "from the same camera.")
+DAMAGED_NOTE = "Part of the video data is not where its index says: it was overwritten, or lies elsewhere."
+_PRE_MDAT = frozenset({b"free", b"skip", b"wide", b"uuid", b"pnot", b"junk", b"PICT"})
+
+
+def _movie_info(mi: dict) -> dict:
     info: dict = {}
     if mi["width"] and mi["height"]:
         info["width"], info["height"] = mi["width"], mi["height"]
     if mi["duration"]:
         info["duration"] = round(mi["duration"], 3)
+    return info
+
+
+def parse_mp4(r: Reader) -> Hit | None:
+    m = bmff_movie(r)
+    if m is None:
+        try:
+            return _without_moov(r)
+        except Exception:                     # a bug in the checks: no worse than before they existed
+            log.debug("MP4 media data check failed at %d", r.start, exc_info=True)
+            return None
+    if m["audio_only"]:
+        return None
+    b, mi = m["walk"], m["moov"]
     name, mtime = _dated(mi["ctime"])
     chance = CHANCE_POOR if b.truncated else CHANCE_GOOD
     desc = "QuickTime movie" if m["ext"] == "mov" else None
-    return Hit(m["ext"], b.end, chance, name=name, mtime=mtime, info=info, description=desc)
+    hit = Hit(m["ext"], b.end, chance, name=name, mtime=mtime, info=_movie_info(mi), description=desc)
+    if b.truncated or b.end is None:
+        return hit
+    try:
+        return _checked(r, b, hit)
+    except Exception:                         # a bug in the checks must not lose a video that was found
+        log.debug("MP4 sample check failed at %d", r.start, exc_info=True)
+        return hit
+
+
+def _checked(r: Reader, b, hit: Hit) -> Hit | None:
+    """HIT (a movie with its movie box) checked against the frames its index lists: as it is, put back
+    together from its pieces, marked damaged, or None for a movie box on its own."""
+    moov = b.first(b"moov")
+    if moov.size is None or moov.size > mp4carve.MAX_MOOV:
+        return hit
+    buf = r.read(moov.offset, moov.size)
+    if len(buf) < moov.size:
+        return hit
+    mdat = next((x for x in b.boxes if x.type == b"mdat" and x.size), None)
+    verdict = mp4carve.quick_check(r, buf, moov.offset, moov_first=mdat is None or mdat.offset > moov.offset)
+    if verdict in ("ok", "unknown"):
+        return hit
+    if verdict == "stray":
+        return None
+    if mdat is not None and mdat.offset < moov.offset:
+        return _damaged(hit)                 # the movie box is right after the media data: nothing moved
+    end = mdat.end if mdat is not None else b.end
+    asm = mp4carve.assemble(r, mp4carve.read_tables(buf), end, mdat.data if mdat is not None else moov.end)
+    if asm is None:
+        return hit if b.brand or verdict == "failed" else None
+    if asm.fragments == 1:
+        return hit if asm.complete else _damaged(hit)
+    return _pieces(hit, asm)
+
+
+def _damaged(hit: Hit) -> Hit:
+    return Hit(hit.ext, hit.length, CHANCE_POOR, hit.name, hit.mtime, dict(hit.info or {}, note=DAMAGED_NOTE),
+               description=hit.description)
+
+
+def _pieces(hit: Hit, asm: mp4carve.Assembly) -> Hit:
+    info = dict(hit.info or {}, fragments=len(asm.runs))
+    if asm.uncertain:
+        info["uncertain_cuts"] = asm.uncertain
+    if asm.damaged:
+        info["damaged_frames"] = asm.damaged
+    if not asm.complete:
+        info["note"] = DAMAGED_NOTE
+    return Hit(hit.ext, sum(n for _o, n in asm.runs), CHANCE_FAIR if asm.complete else CHANCE_POOR, hit.name,
+               hit.mtime, info, description=hit.description, runs=asm.runs)
+
+
+def _mdat_header(r: Reader) -> tuple[bytes, tuple[bytes, ...], int, int, int | None] | None:
+    """A movie that starts like one (ftyp, or QuickTime's wide) and reaches its media data box before any
+    movie box: (brand, compatible brands, offset of the mdat box, its header size, the size it says or None
+    when that is a placeholder: 0, 1 without a 64-bit size, or too small)."""
+    pos, brand, compat = 0, b"", ()
+    for i in range(16):
+        h = r.read(pos, 16)
+        if len(h) < 16:
+            return None
+        size, typ = struct.unpack_from(">I4s", h)
+        if i == 0:
+            if typ == b"ftyp":
+                if not 16 <= size <= 4096:
+                    return None
+                data = r.read(8, size - 8)
+                brand, compat = data[:4], tuple(data[j:j + 4] for j in range(8, len(data) - 3, 4))
+                if not all(32 <= c < 127 for c in brand):
+                    return None
+                pos = size
+                continue
+            if typ != b"wide":
+                return None
+        if typ == b"mdat":
+            if size == 1:
+                large = struct.unpack_from(">Q", h, 8)[0]
+                return brand, compat, pos, 16, large if large >= 16 + 1024 else None
+            return brand, compat, pos, 8, size if size >= 8 + 1024 else None
+        if typ not in _PRE_MDAT or not 8 <= size <= 64 * MiB:
+            return None
+        pos += size
+    return None
+
+
+def _without_moov(r: Reader) -> Hit | None:
+    """Media data with no movie box after it: a fragmented movie whose movie box lies elsewhere (put back
+    together), or a recording that was never finished (measured, marked needs_index)."""
+    head = _mdat_header(r)
+    if head is None:
+        return None
+    brand, compat, at, hdr, declared = head
+    cat, ext = bmff_kind(brand, compat)
+    if cat != "video":
+        return None
+    media = at + hdr
+    end = at + declared if declared else None
+    if mp4carve.media_kind(r, media) is None:
+        return None
+    scan = mp4carve.scan_media(r, media, min(r.limit, end if end else media + 64 * GiB))
+    if end is not None:                      # a finished movie: its movie box should be somewhere
+        hit = _paired(r, ext, media, scan, end)
+        if hit is not None:
+            return hit
+    if scan is None:
+        return None
+    length = scan.end
+    if end is not None and end <= r.limit and end - scan.video_end <= max(64 * KiB, 2 * max(scan.gaps, default=0)):
+        length = end                         # the media data box ends where it says
+    info = {"needs_index": True, "video": scan.video, "frames": scan.frames, "keyframes": scan.keyframes,
+            "media_offset": media, "note": NEEDS_INDEX_NOTE}
+    if scan.sound:
+        info["audio"] = scan.sound           # "pcm" or "compressed": what lies between the video frames
+    return Hit(ext, length, CHANCE_POOR, info=info, description="Unfinished recording (index missing)")
+
+
+def _paired(r: Reader, ext: str, media: int, scan: mp4carve.MediaScan | None, end: int) -> Hit | None:
+    """The movie box of the media data from MEDIA to END, found elsewhere on the disk: the whole file, in
+    pieces. SCAN: the walk through the media data (where to start looking), None if even its first frame
+    didn't check (the first piece of the file is that short)."""
+    found = list(scan.moovs) if scan else []
+    found += mp4carve.find_moovs(r, (scan.video_end if scan else media) - mp4carve.BLOCK,
+                                 end + mp4carve.SEARCH_WINDOW, back=mp4carve.BACK_WINDOW)
+    tried = set()
+    for pm in found:
+        if pm in tried or (pm - end) % mp4carve.BLOCK or len(tried) >= 32:
+            continue
+        tried.add(pm)
+        got = mp4carve.read_moov(r, pm)
+        if got is None or not got[1] or not mp4carve.tables_fit(got[1], media, end):
+            continue
+        buf, tables = got
+        asm = mp4carve.assemble(r, tables, end + len(buf), media, moov=(end, len(buf), pm), need_start=True)
+        if asm is None or not asm.complete:
+            continue
+        mi = moov_info(BytesReader(buf), _Box(b"moov", 0, 8, len(buf)))
+        if mi["audio"] and not mi["video"]:
+            return None
+        name, mtime = _dated(mi["ctime"])
+        hit = Hit(ext, end + len(buf), CHANCE_FAIR, name=name, mtime=mtime, info=_movie_info(mi),
+                  description="QuickTime movie" if ext == "mov" else None)
+        return _pieces(hit, asm) if len(asm.runs) > 1 else hit
+    return None
 
 
 # ---------------------------------------------------------------------- AVI
