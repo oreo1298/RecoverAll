@@ -28,6 +28,16 @@ MP4/MOV/3GP    a recording without its index (moov box: battery, crash, card rem
                from the stream alone when it repeats its parameter sets: picture only); a cut-short file keeps its
                complete frames with shortened sample tables; fragmented files lose an incomplete last fragment;
                data after the end is cut (media/mp4repair.py).
+MKV, WebM      cut short, damaged in the middle, Cues/SeekHead/duration wrong or missing, the start lost (the
+               REFERENCE's header) (media/mkv.py).
+TS, MTS/M2TS   junk and broken packets dropped, video resumed at random-access points, PAT/PMT put in front
+               (media/mpegts.py).
+MPG, VOB, MOD  resync after damage, video resumed at an I picture, sound cut to whole frames, a missing sequence
+               header inserted (media/mpegps.py).
+WMV, WMA, ASF  damaged packets dropped, counts, sizes, durations and the index rebuilt, a lost header from the
+               REFERENCE (media/asf.py).
+FLV            cut at the last complete tag, resync after damage, metadata and key-frame index patched
+               (media/flv.py).
 =============  ===================================================================================================
 
 The input file is never modified: repairs are written to a new file. Everything here is standard library
@@ -62,7 +72,16 @@ EXTENSIONS = {
     "wav": "wav", "avi": "avi", "webp": "webp", "aif": "aiff", "aiff": "aiff", "aifc": "aiff",
     "gz": "gz", "tgz": "gz", "bz2": "bz2", "tbz": "bz2", "tbz2": "bz2", "xz": "xz", "txz": "xz", "mp3": "mp3",
     "mp4": "mp4", "m4a": "mp4", "m4v": "mp4", "mov": "mov", "3gp": "mp4", "qt": "mov",
+    "3g2": "mp4", "lrv": "mp4", "insv": "mp4", "mkv": "mkv", "webm": "webm", "mka": "mkv", "mk3d": "mkv",
+    "weba": "webm", "ts": "ts", "m2ts": "m2ts", "mts": "m2ts", "m2t": "ts", "trp": "ts", "tp": "ts", "tod": "ts",
+    "mpg": "mpg", "mpeg": "mpg", "mpe": "mpg", "m2p": "mpg", "vob": "vob", "mod": "mpg", "vro": "vob",
+    "evo": "vob", "wmv": "wmv", "wma": "wma", "asf": "asf", "dvr-ms": "asf", "flv": "flv",
 }
+# the repair handlers that live in recoverall.core.media, loaded when first needed: kind → (module, function)
+MEDIA_HANDLERS = {"mkv": ("mkv", "plan_mkv"), "ts": ("mpegts", "plan_mpegts"), "ps": ("mpegps", "plan_mpegps"),
+                  "asf": ("asf", "plan_asf"), "flv": ("flv", "plan_flv")}
+# the kinds whose repair can use a reference file of the same camera or program
+REFERENCE_KINDS = {"jpg", "mp4", "mkv", "ts", "ps", "asf", "flv"}
 ZIP_TYPES = {"zip", "docx", "docm", "dotx", "xlsx", "xlsm", "xltx", "pptx", "pptm", "potx", "ppsx", "vsdx",
              "odt", "ods", "odp", "odg", "odf", "ott", "ots", "otp", "epub", "jar", "war", "apk", "aab", "xpi",
              "kmz", "cbz", "ipa", "whl", "3mf", "idml", "sxw", "sxc", "oxt", "nupkg", "appx", "msix"}
@@ -82,7 +101,10 @@ NAMES = {"jpg": "JPEG photo", "png": "PNG image", "gif": "GIF image", "zip": "ZI
          "bz2": "bzip2 file", "xz": "xz file", "mp3": "MP3 sound", "mp4": "MP4 video", "mov": "QuickTime video",
          "docx": "Word document", "xlsx": "Excel workbook", "pptx": "PowerPoint presentation",
          "odt": "OpenDocument text", "ods": "OpenDocument spreadsheet", "odp": "OpenDocument presentation",
-         "epub": "EPUB book", "jar": "Java archive", "apk": "Android package"}
+         "epub": "EPUB book", "jar": "Java archive", "apk": "Android package", "mkv": "Matroska video",
+         "webm": "WebM video", "ts": "MPEG transport stream", "m2ts": "AVCHD / Blu-ray video", "mpg": "MPEG video",
+         "vob": "DVD video", "wmv": "Windows Media video", "wma": "Windows Media audio", "asf": "Windows Media file",
+         "flv": "Flash video"}
 
 
 @dataclass
@@ -196,7 +218,7 @@ def detect(buf, path: str | Path = "") -> str:
     for magic, t in _MAGIC:
         if head.startswith(magic):
             return _zip_subtype(buf, ext) if t == "zip" else t
-    t = _riff_type(head) or _mp4_like(head)
+    t = _riff_type(head) or _mp4_like(head) or _video_type(buf, head, ext)
     if t:
         return t
     first = _mp3_frame_at(buf, 0)
@@ -216,6 +238,26 @@ def detect(buf, path: str | Path = "") -> str:
     return ""
 
 
+def _video_type(buf, head: bytes, ext: str) -> str | None:
+    """Matroska/WebM, Windows Media, Flash video, MPEG program and transport streams, by their content (the
+    extension only picks the name: a transport stream named .mpg is still a transport stream)."""
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm" if b"webm" in head[:64] or ext in ("webm", "weba") else "mkv"
+    if head[:16] == b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c":
+        return {"wma": "wma", "wmv": "wmv"}.get(ext, "asf" if ext in ("asf", "dvr-ms") else "wmv")
+    if head[:4] == b"FLV\x01":
+        return "flv"
+    if head[:4] == b"\x00\x00\x01\xba":
+        from .media.mpegps import detect_mpegps
+        if detect_mpegps(head):
+            return "vob" if ext in ("vob", "vro", "evo") else "mpg"
+    if head[:1] == b"\x47" or head[4:5] == b"\x47" or ext in ("ts", "m2ts", "mts", "m2t", "trp", "tp", "tod"):
+        from .media.mpegts import detect_mpegts
+        if detect_mpegts(bytes(buf[:8192])):
+            return "m2ts" if ext in ("m2ts", "mts", "m2t") else "ts"
+    return None
+
+
 def _kind(t: str) -> str:
     if t in ZIP_TYPES:
         return "zip"
@@ -225,7 +267,30 @@ def _kind(t: str) -> str:
         return "mp4"
     if t in ("gz", "bz2", "xz"):
         return "compressed"
+    if t in ("mkv", "webm"):
+        return "mkv"
+    if t in ("ts", "m2ts"):
+        return "ts"
+    if t in ("mpg", "vob"):
+        return "ps"
+    if t in ("wmv", "wma", "asf"):
+        return "asf"
     return t
+
+
+def _media_handler(module: str, func: str):
+    """A handler from recoverall.core.media, imported when it is first used."""
+    def handler(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTROL) -> Plan:
+        import importlib
+        fn = getattr(importlib.import_module(f"{__package__}.media.{module}"), func)
+        return fn(buf, path, reference=reference, data_offset=data_offset, ctl=ctl)
+    return handler
+
+
+def repairable_name(path: str | Path) -> bool:
+    """Whether a file of this name is a kind the repair knows."""
+    ext = Path(str(path)).suffix.lower().lstrip(".")
+    return ext in EXTENSIONS or ext in ZIP_TYPES
 
 
 # ---------------------------------------------------------------------- JPEG
@@ -1926,9 +1991,11 @@ def _mp4(buf, path, reference=None, data_offset=None, ctl: Control = NULL_CONTRO
 
 # ---------------------------------------------------------------------- the API
 _HANDLERS = {"jpg": _jpeg, "png": _png, "gif": _gif, "zip": _zip, "pdf": _pdf, "riff": _riff,
-             "compressed": _compressed, "mp3": _mp3, "mp4": _mp4}
+             "compressed": _compressed, "mp3": _mp3, "mp4": _mp4,
+             **{kind: _media_handler(mod, fn) for kind, (mod, fn) in MEDIA_HANDLERS.items()}}
 SUPPORTED_TYPES = sorted({"jpg", "png", "gif", "pdf", "wav", "avi", "webp", "aiff", "gz", "bz2", "xz", "mp3",
-                          "mp4", "mov"} | ZIP_TYPES)
+                          "mp4", "mov", "mkv", "webm", "ts", "m2ts", "mpg", "vob", "wmv", "wma", "asf", "flv"}
+                         | ZIP_TYPES)
 
 
 @contextlib.contextmanager
@@ -2088,7 +2155,7 @@ def repair_many(paths: list[str | Path], out_dir: str | Path, reference: str | P
             k += 1
         used.add(target.name)
         try:
-            r = repair(p, target, reference if kind in ("jpg", "mp4", "mov") else None, ctl)
+            r = repair(p, target, reference if _kind(kind) in REFERENCE_KINDS else None, ctl)
         except Cancelled:
             raise
         except RallError as exc:
