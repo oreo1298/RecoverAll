@@ -599,7 +599,16 @@ class PreviewPanel(Card):
                     extra.append((k.title(), str(info[k])))
             for k, v in extra:
                 self.grid.add_row(k, v)
+        for k, v in p.get("details") or []:
+            self.grid.add_row(k, v)
         kind = p.get("kind")
+        if kind == "video":
+            if not p.get("data"):
+                self._kind = "empty"
+                self.stack.setCurrentWidget(self.empty)
+                self.empty.setText("No picture from this video" if not p.get("note") else "")
+                return
+            kind = "image"
         self._kind = kind
         if kind == "image" and p.get("data"):
             img = QImage.fromData(base64.b64decode(p["data"]))

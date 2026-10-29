@@ -16,6 +16,7 @@ import zlib
 
 from .blockio import Source
 from .fs.base import read_head
+from .videopreview import VIDEO_EXTS
 
 IMAGE_LIMIT = 12 * 1024 * 1024        # whole pictures up to this size are sent for the preview
 TEXT_LIMIT = 64 * 1024
@@ -301,6 +302,8 @@ def preview(src: Source, entry: dict, limit: int = IMAGE_LIMIT) -> dict:
     if not head.strip(b"\0") and size:
         out["note"] = "The first bytes are all zeros: the content was probably wiped or overwritten."
         out["valid"] = False
+    if cat == "video" or ext in VIDEO_EXTS:
+        return _video_preview(src, entry, out)
     if cat == "photo" or ext in ("jpg", "jpeg", "png", "gif", "bmp", "webp", "tif", "tiff"):
         info: dict = {}
         if head[:2] == b"\xff\xd8":
@@ -350,12 +353,53 @@ def preview(src: Source, entry: dict, limit: int = IMAGE_LIMIT) -> dict:
     return out
 
 
+def _video_preview(src: Source, entry: dict, out: dict) -> dict:
+    """Details of a video and a picture of its first key frame (see videopreview)."""
+    from . import videopreview as vp
+    try:
+        info, vs = vp.video_details(src, entry)
+    except Exception:  # noqa: BLE001 - a damaged video shows no details, never an error
+        info, vs = {}, None
+    carved = ((entry.get("extra") or {}).get("info") or {})
+    if carved.get("needs_index"):
+        info["needs_index"] = True
+    out["info"] = {k: v for k, v in info.items() if k not in ("poster", "streamable")}
+    out["details"] = vp.describe(info)
+    if info.get("needs_index"):
+        out["note"] = ("The recording was not finished: its index is missing, so players can't open it. Repair "
+                       "it with a reference video from the same camera (Repair page → Repair damaged files).")
+    pic = None
+    if vs is not None and out.get("valid") is not False:
+        try:
+            pic = vp.poster(vs, info)
+        except Exception:  # noqa: BLE001
+            pic = None
+    out["kind"] = "video"
+    out["data"] = b64(pic) if pic else None
+    if pic is None and not out.get("note") and (info.get("poster") or info.get("streamable")) \
+            and not vp.ffmpeg_available():
+        out["note"] = "Install ffmpeg to see a picture from the video."
+    return out
+
+
 def thumbnail(src: Source, entry: dict) -> dict:
     """A small picture for the photo grid: the EXIF/RAW embedded thumbnail when there is one, else the
     whole picture if it's small enough. {"data": base64 or None, "width", "height"}."""
     size = int(entry.get("size") or 0)
-    head = read_head(src, entry, min(size, 256 * 1024))
     out: dict = {"data": None}
+    from .filetypes import category
+    if category(entry.get("name") or "") == "video" or (entry.get("ext") or "") in VIDEO_EXTS:
+        from . import videopreview as vp
+        try:
+            info, vs = vp.video_details(src, entry)
+            pic = vp.poster(vs, info) if vs is not None else None
+        except Exception:  # noqa: BLE001
+            pic = None
+        if pic:
+            out["data"] = b64(pic)
+            out["video"] = True
+        return out
+    head = read_head(src, entry, min(size, 256 * 1024))
     if head[:2] == b"\xff\xd8":
         info, tiff = jpeg_exif(head)
         thumb = exif(tiff).get("thumb") if tiff else None

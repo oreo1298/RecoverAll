@@ -96,14 +96,14 @@ base_pkgs() {
 # Optional tools: imaging failing disks, health, repairs, encrypted volumes, Btrfs, the second engine.
 extra_pkgs() {
   case "$PM" in
-    pacman) echo "ddrescue smartmontools sleuthkit e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
-    apt-get) echo "gddrescue smartmontools sleuthkit e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs hfsprogs cryptsetup-bin mdadm" ;;
-    dnf) echo "ddrescue smartmontools sleuthkit e2fsprogs dosfstools exfatprogs ntfs-3g ntfsprogs xfsprogs btrfs-progs hfsplus-tools cryptsetup mdadm" ;;
-    zypper) echo "gddrescue smartmontools sleuthkit e2fsprogs dosfstools exfatprogs ntfs-3g ntfsprogs xfsprogs btrfsprogs cryptsetup mdadm" ;;
-    xbps-install) echo "ddrescue smartmontools sleuthkit e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
-    apk) echo "ddrescue smartmontools sleuthkit e2fsprogs e2fsprogs-extra dosfstools exfatprogs ntfs-3g-progs xfsprogs btrfs-progs cryptsetup mdadm" ;;
-    eopkg) echo "ddrescue smartmontools e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
-    emerge) echo "sys-fs/ddrescue sys-apps/smartmontools app-forensics/sleuthkit sys-fs/e2fsprogs sys-fs/dosfstools sys-fs/exfatprogs sys-fs/ntfs3g sys-fs/xfsprogs sys-fs/btrfs-progs sys-fs/cryptsetup sys-fs/mdadm" ;;
+    pacman) echo "ddrescue smartmontools sleuthkit ffmpeg e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
+    apt-get) echo "gddrescue smartmontools sleuthkit ffmpeg e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs hfsprogs cryptsetup-bin mdadm" ;;
+    dnf) echo "ddrescue smartmontools sleuthkit ffmpeg-free e2fsprogs dosfstools exfatprogs ntfs-3g ntfsprogs xfsprogs btrfs-progs hfsplus-tools cryptsetup mdadm" ;;
+    zypper) echo "gddrescue smartmontools sleuthkit ffmpeg e2fsprogs dosfstools exfatprogs ntfs-3g ntfsprogs xfsprogs btrfsprogs cryptsetup mdadm" ;;
+    xbps-install) echo "ddrescue smartmontools sleuthkit ffmpeg e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
+    apk) echo "ddrescue smartmontools sleuthkit ffmpeg e2fsprogs e2fsprogs-extra dosfstools exfatprogs ntfs-3g-progs xfsprogs btrfs-progs cryptsetup mdadm" ;;
+    eopkg) echo "ddrescue smartmontools ffmpeg e2fsprogs dosfstools exfatprogs ntfs-3g xfsprogs btrfs-progs cryptsetup mdadm" ;;
+    emerge) echo "sys-fs/ddrescue sys-apps/smartmontools app-forensics/sleuthkit media-video/ffmpeg sys-fs/e2fsprogs sys-fs/dosfstools sys-fs/exfatprogs sys-fs/ntfs3g sys-fs/xfsprogs sys-fs/btrfs-progs sys-fs/cryptsetup sys-fs/mdadm" ;;
     *) echo "" ;;
   esac
 }

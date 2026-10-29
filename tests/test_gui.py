@@ -91,7 +91,7 @@ def test_scan_browse_recover(window):
     page.mode.set_value("quick")
     page.start()
     assert finish(page) == "done"
-    assert page.outer.currentIndex() == 2
+    assert wait_for(lambda: page.outer.currentIndex() == 2, 10)
     res = page.results
     assert wait_for(lambda: res.tree.topLevelItemCount() >= 2, 10)
     assert wait_for(lambda: res.model.total > 0, 10)
@@ -109,7 +109,7 @@ def test_scan_browse_recover(window):
     assert res.btn_rec.isEnabled()
     res._recover_checked()
     assert finish(page) == "done"
-    assert page.outer.currentIndex() == 2          # back to the results
+    assert wait_for(lambda: page.outer.currentIndex() == 2, 10)          # back to the results
 
 
 def test_checking_a_folder_checks_everything_in_it(window):

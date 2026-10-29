@@ -190,3 +190,29 @@ def test_recover_checked_folder_minus_a_subfolder(fat_image, tmp_path):
         assert not (base / "Documents").exists()
     finally:
         api.close()
+
+
+def test_recover_then_repair(tmp_path):
+    """Recovering with "repair" writes a repaired copy next to a file that came back damaged (a photo found by
+    signature whose end was overwritten) and says so in the report."""
+    from mediakit import make_photo
+    need("mkfs.fat", "mcopy", "mdel")
+    photo = make_photo(tmp_path / "p.jpg", size="1280x960").read_bytes()
+    img = mkfs(tmp_path / "card.img", "fat32", size=64 * MiB, label="CARD")
+    mtools_copy(img, {"DCIM/IMG_0009.JPG": photo[:len(photo) * 6 // 10]}, tmp_path)   # cut short
+    mtools_delete(img, "DCIM/IMG_0009.JPG")
+    api = LocalAPI()
+    try:
+        scan = run(api, img, {"mode": "carve", "free_only": True, "formats": ["jpg"]})
+        found = api.scan_search(scan=scan, filters={"exts": ["jpg"]}, limit=10)["rows"]
+        assert len(found) == 1
+        dest = tmp_path / "out"
+        job = api.start_recover(scan=scan, entries=[found[0]["id"]], dest=str(dest), options={"repair": True})
+        res = wait_job(api, job["id"], 120)
+        assert res["state"] == "done", res.get("error")
+        assert res["result"]["repaired"] == 1 and "1 repaired" in res["result"]["message"]
+        repaired = [p for p in dest.rglob("*(repaired)*")]
+        assert len(repaired) == 1 and repaired[0].read_bytes()[-2:] == b"\xff\xd9"
+        assert "REPAIRED" in (dest / "RecoverAll report.txt").read_text()
+    finally:
+        api.close()

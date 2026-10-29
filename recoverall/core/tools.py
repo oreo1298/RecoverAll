@@ -31,6 +31,7 @@ PROGRAMS: dict[str, tuple[str, str, str]] = {
     "reiserfsck": ("reiserfsprogs", "check and repair ReiserFS", "repair"),
     "cryptsetup": ("cryptsetup", "unlock LUKS and BitLocker volumes", "volumes"),
     "mdadm": ("mdadm", "read Linux software-RAID members", "volumes"),
+    "ffmpeg": ("ffmpeg (Fedora: ffmpeg-free)", "pictures from found videos; checking repaired videos", "engines"),
     "fls": ("sleuthkit", "second engine: APFS, UFS, HFS", "engines"),
     "icat": ("sleuthkit", "second engine: read files", "engines"),
 }
@@ -58,6 +59,7 @@ def capabilities() -> dict:
         "tsk": have("fls", "icat"),
         "btrfs": have("btrfs"),
         "cryptsetup": have("cryptsetup"),
+        "ffmpeg": have("ffmpeg"),
         "fsck": {fs: have(prog) for fs, prog in (("ext", "e2fsck"), ("fat", "fsck.fat"), ("exfat", "fsck.exfat"),
                                                   ("ntfs", "ntfsfix"), ("xfs", "xfs_repair"), ("btrfs", "btrfs"),
                                                   ("hfsplus", "fsck.hfsplus"), ("f2fs", "fsck.f2fs"))},

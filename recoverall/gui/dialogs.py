@@ -127,6 +127,26 @@ class RecoverDialog(QDialog):
         self.report = QCheckBox("Write a report (which files had unreadable parts)")
         self.report.setChecked(gs.write_report)
         f.addRow("", self.report)
+        self.repair = QCheckBox("Repair damaged photos and videos afterwards (as copies named “… (repaired)”)")
+        self.repair.setToolTip("Files found by signature, and deleted files with less than a good chance, are "
+                               "checked; the ones that are damaged get a repaired copy next to them.")
+        self.repair.setChecked(gs.repair_after)
+        f.addRow("", self.repair)
+        ref_row = QHBoxLayout()
+        self.reference = QLineEdit()
+        self.reference.setPlaceholderText("Optional: a good video or photo from the same camera")
+        self.reference.setToolTip("Unfinished recordings (the camera stopped before writing the video's index) can "
+                                  "only be repaired with a good recording from the same camera with the same "
+                                  "settings. A photo from the same camera helps photos whose header is lost.")
+        rb = icon_button("", "open", "", "Choose the reference file")
+        rb.clicked.connect(self._browse_reference)
+        ref_row.addWidget(self.reference, 1)
+        ref_row.addWidget(rb)
+        self.ref_label = QLabel("Reference")
+        f.addRow(self.ref_label, ref_row)
+        self.repair.toggled.connect(lambda on: (self.reference.setEnabled(on), rb.setEnabled(on)))
+        self.reference.setEnabled(self.repair.isChecked())
+        rb.setEnabled(self.repair.isChecked())
         lay.addLayout(f)
         note = QLabel("Nothing is overwritten: a second file with the same name gets “ (2)”. Names the destination "
                       "can't store (FAT/NTFS sticks) are made safe.")
@@ -145,15 +165,28 @@ class RecoverDialog(QDialog):
         if d:
             self.folder.setText(d)
 
+    def _browse_reference(self) -> None:
+        p, _f = QFileDialog.getOpenFileName(self, "A good file from the same camera", os.path.expanduser("~"),
+                                            "Videos and photos (*.mp4 *.mov *.m4v *.3gp *.mkv *.mts *.m2ts *.avi "
+                                            "*.jpg *.jpeg);;All files (*)")
+        if p:
+            self.reference.setText(p)
+
     def value(self) -> tuple[str, dict]:
         dest = self.folder.text().strip()
         self.gs.recover_folder = dest
         self.gs.keep_paths = self.keep.isChecked()
         self.gs.restore_times = self.times.isChecked()
         self.gs.write_report = self.report.isChecked()
+        self.gs.repair_after = self.repair.isChecked()
         self.gs.save()
-        return dest, {"keep_paths": self.keep.isChecked(), "volume_folders": self.keep.isChecked(),
-                      "restore_times": self.times.isChecked(), "report": self.report.isChecked()}
+        opts = {"keep_paths": self.keep.isChecked(), "volume_folders": self.keep.isChecked(),
+                "restore_times": self.times.isChecked(), "report": self.report.isChecked(),
+                "repair": self.repair.isChecked()}
+        ref = self.reference.text().strip()
+        if self.repair.isChecked() and ref:
+            opts["reference"] = ref
+        return dest, opts
 
 
 class UnlockDialog(QDialog):

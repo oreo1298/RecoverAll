@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .blockio import Source
 from .errors import Cancelled, RallError
-from .fs.base import CHANCE_NAMES, F_ADS, F_CARVED, F_SYMLINK, read_content
+from .fs.base import CHANCE_GOOD, CHANCE_NAMES, F_ADS, F_CARVED, F_SYMLINK, read_content
 from .results import ScanDB
 from .safety import check_destination
 from .util import caller_ids, fmt_bytes, fmt_duration, fmt_rate, safe_filename
@@ -83,6 +83,9 @@ class Recovery:
         self.done_files = 0
         self.failed = 0
         self.damaged = 0
+        self.repaired = 0
+        self.need_reference = 0
+        self.written: list[tuple[dict, str]] = []     # (row, where it went), for the repair pass
 
     # ------------------------------------------------------------------ names and places
     def clean(self, name: str) -> str:
@@ -246,8 +249,10 @@ class Recovery:
             if self.ctl is not None:
                 self.ctl.check()
             try:
-                self.copy(r)
+                out = self.copy(r)
                 self.done_files += 1
+                if out:
+                    self.written.append((r, out))
             except Cancelled:
                 raise
             except RallError as exc:
@@ -264,16 +269,65 @@ class Recovery:
                     self.job.warn(f"{r['name']}: {exc.strerror or exc}")
             self.tick()
         self.tick(force=True)
+        if self.o.get("repair"):
+            self.repair_pass()
         report = self.write_report(rows)
         msg = f"Recovered {self.done_files:,} files ({fmt_bytes(self.done_bytes)})".replace(",", " ")
         if self.failed:
             msg += f", {self.failed} failed"
         if self.damaged:
             msg += f", {self.damaged} with unreadable parts"
+        if self.repaired:
+            msg += f", {self.repaired} repaired"
+        if self.need_reference:
+            msg += f", {self.need_reference} need a reference file to be repaired"
         if self.job is not None:
             self.job.update(message=msg, force=True)
         return {"files": self.done_files, "bytes": self.done_bytes, "failed": self.failed, "damaged": self.damaged,
-                "dest": self.dest, "report": report, "message": msg}
+                "repaired": self.repaired, "need_reference": self.need_reference, "dest": self.dest,
+                "report": report, "message": msg}
+
+    # ------------------------------------------------------------------ repairing what came back damaged
+    def _worth_checking(self, r: dict, path: str) -> bool:
+        """Files that may have come back damaged: found by signature, deleted with less than a good chance,
+        or with unreadable parts — of a type the file repair knows."""
+        if not _repairable(path):
+            return False
+        return bool(r["flags"] & F_CARVED) or (r["deleted"] and r["chance"] < CHANCE_GOOD) or \
+            any(path in line for line in self.report)
+
+    def repair_pass(self) -> None:
+        """Check the recovered photos, videos and documents that may be damaged, and write a repaired copy
+        next to each one that needs it ("name (repaired).ext"); the original stays as it came back."""
+        from . import filerepair
+        from .filetypes import category
+        todo = [(r, p) for r, p in self.written if self._worth_checking(r, p)]
+        if not todo:
+            return
+        reference = self.o.get("reference") or None
+        if self.job is not None:
+            self.job.log(f"Checking {len(todo)} recovered file{'s' if len(todo) != 1 else ''} that may be damaged")
+        for i, (r, path) in enumerate(todo):
+            if self.ctl is not None:
+                self.ctl.check()
+            if self.job is not None and (i % 4 == 0 or i == len(todo) - 1):
+                self.job.update(message=f"Checking damaged files: {i + 1} of {len(todo)}")
+            ref = reference if reference and category(reference) == category(path) else None
+            out = self.unique(os.path.join(os.path.dirname(path), filerepair.output_name(path)))
+            try:
+                res = filerepair.repair(path, out, ref, self.ctl)
+            except Cancelled:
+                raise
+            except (RallError, OSError, ValueError) as exc:
+                self.report.append(f"NOT CHECKED {path}  ({exc})")
+                continue
+            if res.get("out"):
+                self.repaired += 1
+                self.owner.give(res["out"])
+                self.report.append(f"REPAIRED {path}  → {os.path.basename(res['out'])}: {res.get('message', '')}")
+            elif (res.get("info") or {}).get("needs_reference"):
+                self.need_reference += 1
+                self.report.append(f"NEEDS A REFERENCE {path}  ({res.get('message', '')})")
 
     def check_space(self) -> None:
         try:
@@ -323,6 +377,16 @@ class Recovery:
             return path
         except OSError:
             return None
+
+
+def _repairable(path: str) -> bool:
+    """Whether the file repair knows this kind of file (by its name)."""
+    from . import filerepair
+    check = getattr(filerepair, "repairable_name", None)
+    if check is not None:
+        return check(path)
+    ext = Path(path).suffix.lower().lstrip(".")
+    return ext in filerepair.EXTENSIONS or ext in filerepair.ZIP_TYPES
 
 
 def _unlink(p: str) -> None:

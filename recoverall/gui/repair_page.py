@@ -6,9 +6,11 @@ Recover first, repair second: a repair writes to the disk, and a failed one can 
 
 from __future__ import annotations
 
+import html
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -84,10 +86,12 @@ class RepairPage(OperationPage):
         lay.addWidget(c2)
 
         c3 = Card("Repair damaged files", "file")
-        c3.add(hint("Photos that open grey or half, Office documents and archives that “are corrupt”, PDFs that "
-                    "won't open, WAV/AVI files that stop early. The originals are never changed: repaired copies are "
-                    "written next to them (or into the folder below).", faint=False))
-        self.files = QListWidget()
+        c3.add(hint("Videos that won't play — recordings the camera or phone never finished (MP4, MOV), cut-short "
+                    "or damaged MKV, MTS/M2TS, MPG, WMV, FLV and AVI files —, photos that open grey or half, camera "
+                    "RAW files whose preview can still be saved, Office documents and archives that “are corrupt”, "
+                    "PDFs that won't open. The originals are never changed: repaired copies are written next to "
+                    "them (or into the folder below). Drop files here or add them.", faint=False))
+        self.files = _DropList()
         self.files.setMinimumHeight(110)
         self.files.setSelectionMode(QListWidget.ExtendedSelection)
         c3.add(self.files)
@@ -103,7 +107,11 @@ class RepairPage(OperationPage):
         frow = QHBoxLayout()
         frow.addWidget(QLabel("Reference"))
         self.ref = QLineEdit()
-        self.ref.setPlaceholderText("optional: a good photo from the same camera (rebuilds damaged JPEG headers)")
+        self.ref.setPlaceholderText("optional: a good video or photo from the same camera, same settings — "
+                                    "unfinished recordings need one")
+        self.ref.setToolTip("A recording the camera finished properly, made with the same resolution and frame rate: "
+                            "RecoverAll learns the codec settings from it to rebuild the index of a recording that "
+                            "was cut off. For photos, a picture from the same camera rebuilds a lost header.")
         rb = icon_button("", "open", "", "Choose the reference file")
         rb.clicked.connect(self._ref)
         frow.addWidget(self.ref, 1)
@@ -130,7 +138,10 @@ class RepairPage(OperationPage):
         self.analysis = QLabel("")
         self.analysis.setWordWrap(True)
         self.analysis.setTextFormat(Qt.RichText)
+        self.analysis.setOpenExternalLinks(False)
+        self.analysis.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl.fromLocalFile(url)))
         c3.add(self.analysis)
+        self._file_out: str | None = None
         lay.addWidget(c3)
         lay.addStretch(1)
 
@@ -288,16 +299,26 @@ class RepairPage(OperationPage):
     def finish_run(self) -> None:
         self.job_id = None
         self.outer.setCurrentIndex(0)
+        if self._file_out:
+            folder, self._file_out = self._file_out, None
+            self.analysis.setText(f"The repaired copies are in <a href=\"{html.escape(folder)}\">"
+                                  f"{html.escape(folder)}</a> (named “… (repaired)”). The job's log says "
+                                  "what was done to each file.")
+            return
         self.bridge.fetch_disks()
         if self.source.current_disk():
             self.diagnose()
 
     # ------------------------------------------------------------------ files
     def _add_files(self) -> None:
-        paths, _f = QFileDialog.getOpenFileNames(self, "Damaged files", self.gs.recover_folder or os.path.expanduser("~"))
-        for p in paths:
-            if not self.files.findItems(p, Qt.MatchExactly):
-                self.files.addItem(QListWidgetItem(p))
+        start = self.gs.recover_folder or os.path.expanduser("~")
+        paths, _f = QFileDialog.getOpenFileNames(self, "Damaged files", start,
+                                                 "Videos, photos and documents (*.mp4 *.mov *.m4v *.3gp *.mkv *.webm "
+                                                 "*.mts *.m2ts *.ts *.mpg *.mpeg *.vob *.wmv *.asf *.flv *.avi *.jpg "
+                                                 "*.jpeg *.png *.gif *.webp *.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 "
+                                                 "*.raf *.pef *.srw *.docx *.xlsx *.pptx *.odt *.zip *.pdf *.wav "
+                                                 "*.mp3);;All files (*)")
+        self.files.add_paths(paths)
 
     def _ref(self) -> None:
         p, _f = QFileDialog.getOpenFileName(self, "A good file from the same camera or program", os.path.expanduser("~"))
@@ -326,10 +347,21 @@ class RepairPage(OperationPage):
                 for q in paths:
                     r = results[q]
                     probs = r.get("problems") or []
-                    rows.append(f"<b>{os.path.basename(q)}</b> ({r.get('type') or '?'}): " +
-                                ("; ".join(probs) if probs else "looks fine") +
-                                ("" if r.get("repairable", True) or not probs else " — can't be repaired here"))
-                self.analysis.setText("<br>".join(rows))
+                    kind = html.escape(r.get("name") or r.get("type") or "?")
+                    line = f"<b>{html.escape(os.path.basename(q))}</b> ({kind}): "
+                    line += html.escape("; ".join(probs)) if probs else "looks fine"
+                    if probs and r.get("repairable"):
+                        acts = r.get("actions") or []
+                        if acts:
+                            line += " — <i>" + html.escape("; ".join(acts)) + "</i>"
+                    elif probs and (r.get("info") or {}).get("needs_reference"):
+                        line += " — <b>add a reference video from the same camera, then repair</b>"
+                    elif probs:
+                        line += " — can't be repaired"
+                    if probs and r.get("note"):
+                        line += f"<br><span style='opacity:.75'>{html.escape(r['note'])}</span>"
+                    rows.append(line)
+                self.analysis.setText("<br><br>".join(rows))
         for p in paths:
             self.bridge.call("file_analyze", done=lambda a, p=p: got(p, a),
                              error=lambda e, p=p: got(p, {"problems": [str(e)], "repairable": False}), path=p)
@@ -340,5 +372,39 @@ class RepairPage(OperationPage):
             self.bridge.message.emit("Add the damaged files first", "warning")
             return
         out = self.out.text().strip() or os.path.dirname(paths[0])
+        self._file_out = out
         self.bridge.call("start_file_repair", done=self.run_job, paths=paths, out_dir=out,
                          reference=self.ref.text().strip() or None)
+
+
+class _DropList(QListWidget):
+    """The list of files to repair: files dropped on it are added."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DropOnly)
+
+    def add_paths(self, paths) -> None:
+        for p in paths:
+            if p and os.path.isfile(p) and not self.findItems(p, Qt.MatchExactly):
+                self.addItem(QListWidgetItem(p))
+
+    def dragEnterEvent(self, e) -> None:  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e) -> None:  # noqa: N802
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e) -> None:  # noqa: N802
+        if e.mimeData().hasUrls():
+            self.add_paths(u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile())
+            e.acceptProposedAction()
+        else:
+            super().dropEvent(e)

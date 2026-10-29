@@ -29,6 +29,7 @@ optdepends=('ddrescue: the best imager for failing disks'
             'ntfs-3g: fix common NTFS problems'
             'xfsprogs: check and repair XFS'
             'mdadm: read Linux software-RAID members'
+            'ffmpeg: pictures from found videos'
             'f2fs-tools: check and repair F2FS'
             'jfsutils: check and repair JFS')
 makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')

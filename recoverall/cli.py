@@ -466,7 +466,10 @@ def cmd_recover(api, args) -> int:
             ids.extend(hits)
     else:
         ids = [v["root_id"] for v in info["volumes"] if v.get("root_id")]
-    opts = {"keep_paths": not args.flat, "restore_times": True, "volume_folders": not args.flat}
+    opts = {"keep_paths": not args.flat, "restore_times": True, "volume_folders": not args.flat,
+            "repair": args.repair or bool(args.reference)}
+    if args.reference:
+        opts["reference"] = os.path.abspath(args.reference)
     job = api.start_recover(scan=scan, entries=ids, dest=os.path.abspath(args.dest), options=opts,
                             filters=_filters(args))
     if not args.json:
@@ -495,7 +498,9 @@ def cmd_photos(api, args) -> int:
     ids = [v["root_id"] for v in info["volumes"] if v.get("root_id")]
     filt = {"cats": cats, "deleted": None if args.all else True}
     rec = api.start_recover(scan=scan, entries=ids, dest=os.path.abspath(args.dest),
-                            options={"keep_paths": True, "volume_folders": True}, filters=filt)
+                            options={"keep_paths": True, "volume_folders": True, "repair": not args.no_repair,
+                                     **({"reference": os.path.abspath(args.reference)} if args.reference else {})},
+                            filters=filt)
     if not args.json:
         print(bold(rec["title"]))
     r = follow(api, rec, args)
@@ -863,12 +868,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("dest")
     p.add_argument("paths", nargs="*", help="2:/Users/anna/Pictures, 1:/DCIM/*.JPG … (default: everything)")
     p.add_argument("--flat", action="store_true", help="don't recreate the folders")
+    p.add_argument("--repair", action="store_true",
+                   help="then write repaired copies of the photos and videos that came back damaged")
+    p.add_argument("--reference", metavar="FILE",
+                   help="a good video or photo from the same camera (repairs unfinished recordings; implies --repair)")
     filter_args(p)
-    p = sub.add_parser("photos", help="one step: find and recover deleted photos and videos")
+    p = sub.add_parser("photos", help="one step: find and recover deleted photos and videos (and repair them)")
     source_args(p)
     p.add_argument("dest")
     p.add_argument("--types", help="categories or extensions (default photo,video)")
     p.add_argument("--all", action="store_true", help="also the files that weren't deleted")
+    p.add_argument("--no-repair", action="store_true", help="don't repair the ones that came back damaged")
+    p.add_argument("--reference", metavar="FILE",
+                   help="a good video or photo from the same camera (repairs unfinished recordings)")
     p = sub.add_parser("preview", help="what a found file looks like (text, info, hex)")
     p.add_argument("scan", help="a scan file, \"last\", or its number or name in `recoverctl scans`")
     p.add_argument("file", help="its name")

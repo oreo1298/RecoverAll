@@ -22,6 +22,7 @@ class GuiSettings:
     keep_paths: bool = True
     restore_times: bool = True
     write_report: bool = True
+    repair_after: bool = True         # write repaired copies of recovered files that came back damaged
     show_system: bool = False
     carve_types: list = field(default_factory=lambda: ["photo", "video", "audio", "document", "archive", "email",
                                                        "database", "executable", "other"])
